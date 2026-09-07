@@ -110,8 +110,12 @@ class Agent:
             for part in completion.message.parts:
                 if part.type == "thinking" and part.text:
                     yield Step("thinking", part.text)
-            # Text was already streamed into on_text; only emit it when it was not.
-            if on_text is None:
+            # Emit text as a step UNLESS it was actually streamed to on_text.
+            # Streaming only happens in native mode; the prompted harness never
+            # streams (it re-parses the whole reply), so its text must be
+            # emitted here or it would be generated and silently dropped.
+            streamed = on_text is not None and self._resolved_mode == "native"
+            if not streamed:
                 for part in completion.message.parts:
                     if part.type == "text" and part.text:
                         yield Step("text", part.text)

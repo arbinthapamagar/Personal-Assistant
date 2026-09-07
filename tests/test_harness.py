@@ -216,3 +216,36 @@ def test_agent_switches_to_prompted_when_backend_rejects_tools(tmp_path):
     out = [s for s in agent.turn("hi") if s.kind == "text"]
     assert any("prompted" in s.text for s in out)
     assert agent._resolved_mode == "prompted"   # healed
+
+
+def test_prompted_reply_is_shown_even_when_streaming_is_on(tmp_path):
+    """Regression: a prompted-harness model (e.g. dolphin) does not stream, so
+    its text must be emitted as a step even when the caller passed on_text -
+    otherwise the reply is generated and silently dropped."""
+    import sys as _sys
+    from pathlib import Path as _P
+    _sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "src"))
+    from pa import capabilities, config as config_mod
+    from pa.agent import Agent
+    from pa.messages import Completion, Message, Text, Usage
+    from pa.providers.base import Provider
+    from pa.security import Gate
+    from pa.tools.base import ToolContext, build_registry
+
+    class PromptedProvider(Provider):
+        name = "fake"
+        def complete(self, *, system, messages, tools=(), on_text=None):
+            # A prompted-mode reply: plain text, and it never calls on_text.
+            return Completion(Message("assistant", [Text("hello from dolphin")]),
+                              "end_turn", Usage(1, 1), "dolphin")
+
+    cfg = config_mod.default_config()
+    cfg.active_profile = "local"; cfg.security.mode = "allow"
+    cfg.tools = ["shell"]; cfg.harness = "prompted"; cfg.auto_memory = {"enabled": False}
+    caps = capabilities.probe()
+    ctx = ToolContext(cfg, caps, Gate(cfg.security), lambda k, d: True)
+    agent = Agent(cfg, PromptedProvider(cfg.profile, cfg), build_registry(cfg, caps), ctx, caps)
+
+    # on_text IS provided (streaming interactive path) but must not swallow text.
+    texts = [s.text for s in agent.turn("hi", on_text=lambda d: None) if s.kind == "text"]
+    assert any("hello from dolphin" in t for t in texts)
