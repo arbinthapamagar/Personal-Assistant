@@ -1,0 +1,69 @@
+# Personal Assistant configuration.
+# Switch provider live with `/profile <name>`, or at launch with `pa --profile <name>`.
+
+active_profile: claude
+
+profiles:
+  claude:
+    provider: anthropic
+    model: claude-opus-5
+    effort: high            # low | medium | high | xhigh | max
+
+  gpt:
+    provider: openai
+    model: gpt-5
+
+  gemini:
+    provider: google
+    model: gemini-2.5-pro
+
+  local:                    # no API key, no network, runs on this machine
+    provider: ollama
+    model: qwen2.5-coder:14b
+    base_url: http://localhost:11434
+
+  groq:                     # any OpenAI-compatible endpoint
+    provider: openai-compat
+    model: llama-3.3-70b-versatile
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+
+tools:
+  enabled: [shell, files, web, skills, tasks, memory, agents, voice, browser, desktop]
+  workspace: ~/             # writes outside this need confirmation
+
+security:
+  mode: ask                 # ask | allow | deny
+  allow:                    # glob patterns that never prompt
+    - "files.read:*"
+    - "shell:git status*"
+    - "shell:ls*"
+  deny:                     # patterns that are always refused
+    - "shell:*rm -rf /*"
+    - "shell:*mkfs*"
+    - "shell:*dd if=*of=/dev/*"
+
+max_steps: 40               # tool-call budget per user turn
+max_parallel_tools: 8       # how many tool calls run at once in a batch
+auto_install_deps: true     # fetch optional packages on first use
+stream: true
+
+# Shared state for background tasks and cross-session locks.
+state_backend: auto         # auto (redis if reachable, else sqlite) | sqlite | redis
+redis_url: redis://localhost:6379/0
+
+# Web search backend for the web_search tool.
+search:
+  backend: duckduckgo       # duckduckgo (no key) | searxng | brave
+  # base_url: http://localhost:8888     # for searxng
+  # api_key_env: BRAVE_API_KEY          # for brave
+
+# Voice: local speech in and out. Talk with `pa --voice`, or /voice in the REPL.
+speak_replies: false        # also speak every reply aloud in text mode
+voice:
+  tts_backend: auto         # auto (piper if a voice model exists, else espeak) | piper | espeak
+  # voice_model: ~/.local/share/personal-assistant/voices/en_US-amy-medium.onnx
+  stt_model: base           # faster-whisper size: tiny | base | small | medium
+  rate: 175                 # espeak words-per-minute (ignored by piper)
+  silence_end: 1.2          # seconds of quiet that end a spoken turn
+  max_seconds: 30

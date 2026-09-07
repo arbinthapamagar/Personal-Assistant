@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "personal-assistant"
+version = "0.1.0"
+description = "Provider-agnostic AI agent that drives your terminal, browser, and desktop"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "pyyaml>=6.0",
+    "rich>=13.7",
+    "prompt_toolkit>=3.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]
+openai    = ["openai>=1.40"]
+google    = ["google-genai>=0.3"]
+browser   = ["playwright>=1.44"]
+desktop   = ["pillow>=10.0"]
+memory    = ["chromadb>=0.5"]
+redis     = ["redis>=5.0"]
+voice     = ["piper-tts>=1.2", "faster-whisper>=1.0"]
+all = [
+    "anthropic>=0.40", "openai>=1.40", "google-genai>=0.3",
+    "playwright>=1.44", "pillow>=10.0", "chromadb>=0.5", "redis>=5.0",
+    "piper-tts>=1.2", "faster-whisper>=1.0",
+]
+
+[project.scripts]
+pa = "pa.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
