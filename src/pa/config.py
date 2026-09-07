@@ -137,6 +137,8 @@ class Config:
     #: Cap on tools shown to the model. Small local models drown in a big tool
     #: list; 0 means no cap. Applied by the agent when building the prompt.
     max_tools: int = 0
+    #: Autonomous mode: max turns the agent runs unattended pursuing a goal.
+    autopilot_max: int = 12
     #: Curated tool groups used when the active provider is local, unless the
     #: user set `tools` explicitly. Keeps weak models focused.
     local_tools: list[str] = field(
@@ -232,7 +234,7 @@ def load(path: Path | None = None, overrides: dict[str, Any] | None = None) -> C
         for key in (
             "system_prompt", "max_steps", "auto_install_deps", "stream",
             "max_parallel_tools", "state_backend", "redis_url",
-            "harness", "max_tools",
+            "harness", "max_tools", "autopilot_max",
         ):
             if key in raw:
                 setattr(cfg, key, raw[key])

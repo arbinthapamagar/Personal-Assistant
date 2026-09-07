@@ -30,6 +30,7 @@ commands
   /check                verify the current provider's credentials
   /mode [ask|allow|deny] show or change the permission mode
   /yolo                 skip all permission prompts (toggle)
+  /auto <goal>          autonomous mode: pursue a goal across many turns
   /audit                what has been approved or denied this session
   /stats                token usage for this session
   /voice                toggle spoken input and replies
@@ -110,6 +111,8 @@ switch model live with  /profile <name>  or  /model <id>
                         help="Talk to it: spoken input, spoken replies.")
     parser.add_argument("--yolo", action="store_true",
                         help="Skip ALL permission prompts this session (like --mode allow).")
+    parser.add_argument("--auto", action="store_true",
+                        help="Autonomous mode: pursue the given prompt as a goal, unattended.")
 
     daemon_group = parser.add_argument_group("daemon (a persistent agent reachable from anywhere)")
     daemon_group.add_argument("--serve", action="store_true",
@@ -203,18 +206,10 @@ def doctor(ui: UI, cfg: config_mod.Config) -> int:
     return 0
 
 
-def run_turn(agent: Agent, ui: UI, prompt: str, *, speak=None) -> bool:
-    """Drive one user turn and render it. Returns False if the turn failed,
-    so a one-shot invocation can exit non-zero for scripts.
-
-    `speak`, when given, is called with the assistant's final text so voice
-    mode can read the answer aloud. Only the last text block is spoken - a
-    running commentary of every intermediate step would be unbearable."""
-    # Voice mode listens rather than reads, so streaming tokens to screen buys
-    # nothing there - turn it off so the whole reply is spoken cleanly.
+def _render_steps(agent: Agent, ui: UI, steps, *, streaming: bool) -> bool:
+    """Render a stream of agent Steps with a busy-spinner. Shared by a normal
+    turn and autonomous mode. Returns False if any step errored."""
     failed = False
-    # A spinner shows the model is busy (esp. a slow local cold-load). It stops
-    # the instant any output appears - a streamed token, or the first step.
     spinner = ui.working("thinking").start()
     stopped = {"v": False}
 
@@ -223,23 +218,18 @@ def run_turn(agent: Agent, ui: UI, prompt: str, *, speak=None) -> bool:
             spinner.stop()
             stopped["v"] = True
 
-    def _on_text(delta: str) -> None:
-        _stop_spin()
-        ui.stream(delta)
-
-    on_text = _on_text if (agent.config.stream and speak is None) else None
     try:
-        for step in agent.turn(prompt, on_text=on_text):
-            _stop_spin()  # any step means the model responded
+        for step in steps:
+            _stop_spin()
             if step.kind in ("tool", "result", "error", "thinking"):
                 ui.end_stream()
             if step.kind == "text":
-                ui.markdown(step.text)
+                if not streaming:      # streamed text already rendered live
+                    ui.markdown(step.text)
             elif step.kind == "thinking":
                 ui.thinking(step.text)
             elif step.kind == "tool":
                 ui.tool_call(step.tool, step.args)
-                # Back to spinning while the tool runs / next model call loads.
                 spinner.update("working"); stopped["v"] = False; spinner.start()
             elif step.kind == "result":
                 _stop_spin()
@@ -251,21 +241,40 @@ def run_turn(agent: Agent, ui: UI, prompt: str, *, speak=None) -> bool:
                 failed = True
                 ui.error(step.text)
     except KeyboardInterrupt:
-        _stop_spin()
-        ui.end_stream()
+        _stop_spin(); ui.end_stream()
         ui.warn("interrupted - the conversation is intact, ask something else")
         return False
     finally:
-        _stop_spin()
-        ui.end_stream()
-    if speak is not None and not failed:
-        # The final assistant message is the answer; read that, not the
-        # intermediate tool chatter.
+        _stop_spin(); ui.end_stream()
+    return not failed
+
+
+def run_turn(agent: Agent, ui: UI, prompt: str, *, speak=None) -> bool:
+    """Drive one user turn and render it. Returns False if the turn failed."""
+    streaming = agent.config.stream and speak is None
+
+    def _on_text(delta: str) -> None:
+        ui.stream(delta)
+
+    on_text = _on_text if streaming else None
+    ok = _render_steps(agent, ui, agent.turn(prompt, on_text=on_text), streaming=streaming)
+    if speak is not None and ok:
         for message in reversed(agent.session.messages):
             if message.role == "assistant" and message.text.strip():
                 speak(message.text)
                 break
-    return not failed
+    return ok
+
+
+def run_autopilot(agent: Agent, ui: UI, goal: str) -> bool:
+    """Run the agent autonomously toward a goal, rendering each turn."""
+    ui.rule("autopilot")
+    ui.info(f"goal: {goal}")
+    streaming = agent.config.stream
+    on_text = ui.stream if streaming else None
+    ok = _render_steps(agent, ui, agent.autopilot(goal, on_text=on_text), streaming=streaming)
+    ui.rule()
+    return ok
 
 
 def handle_command(line: str, state: dict) -> bool:
@@ -436,6 +445,12 @@ def handle_command(line: str, state: dict) -> bool:
             ui.warn("YOLO: every tool call now runs without asking. "
                     + ("The safety floor is OFF too." if agent.ctx.gate.floor_off
                        else "The catastrophic-command floor still applies."))
+    elif cmd == "auto":
+        goal = " ".join(args)
+        if not goal:
+            ui.warn("usage: /auto <goal>  — e.g. /auto find and summarise the TODOs in this repo")
+        else:
+            run_autopilot(agent, ui, goal)
     elif cmd == "audit":
         ui.console.print(agent.ctx.gate.audit())
     elif cmd == "stats":
@@ -493,17 +508,42 @@ def repl(agent: Agent, ui: UI, cfg: config_mod.Config, *, voice_mode: bool = Fal
         c = state["config"]
         return f"  {c.active_profile} · {agent.provider.model} · mode:{c.security.mode}   /help"
 
+    queued: list[str] = []  # prompts typed while the agent was working
+
+    def _process(line: str) -> bool:
+        """Handle one line (command or turn). Returns False to exit the REPL."""
+        nonlocal cfg
+        line = line.strip()
+        if not line:
+            return True
+        if line.startswith("/"):
+            keep = handle_command(line, state)
+            cfg = state["config"]
+            return keep
+        speak = _speaker(state) if (state["voice_mode"] or cfg.speak_replies) else None
+        run_turn(agent, ui, line, speak=speak)
+        # Anything typed WHILE that turn ran was buffered by the terminal;
+        # pull it in now so it runs next, in order - Claude-Code-style queueing.
+        for ahead in _drain_typeahead():
+            ui.info(f"↳ queued: {ahead}")
+            queued.append(ahead)
+        return True
+
     while True:
+        # Run anything queued from type-ahead before prompting again.
+        if queued:
+            if not _process(queued.pop(0)):
+                return 0
+            continue
+
         if state["voice_mode"]:
             line = _voice_input(state)
-            if line is None:  # voice mode turned itself off, fall through to typing
+            if line is None:
                 continue
         else:
             try:
-                if prompt_session is not None:
-                    line = prompt_session.prompt("› ", bottom_toolbar=toolbar)
-                else:
-                    line = input("> ")
+                line = (prompt_session.prompt("› ", bottom_toolbar=toolbar)
+                        if prompt_session is not None else input("> "))
             except EOFError:
                 ui.console.print()
                 return 0
@@ -511,16 +551,34 @@ def repl(agent: Agent, ui: UI, cfg: config_mod.Config, *, voice_mode: bool = Fal
                 ui.console.print("[dim](ctrl-d or /quit to exit)[/]")
                 continue
 
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("/"):
-            if not handle_command(line, state):
-                return 0
-            cfg = state["config"]  # a slash command may have swapped the config
-            continue
-        speak = _speaker(state) if (state["voice_mode"] or cfg.speak_replies) else None
-        run_turn(agent, ui, line, speak=speak)
+        if not _process(line):
+            return 0
+
+
+def _drain_typeahead() -> list[str]:
+    """Non-blocking read of any whole lines the user typed while the agent was
+    busy (the terminal line-buffers them in cooked mode). Returns them in
+    order; empty if none or not a TTY. This is what makes queueing work without
+    a background thread fighting the prompt for stdin."""
+    import select
+
+    try:
+        if not sys.stdin.isatty():
+            return []
+    except (ValueError, OSError):
+        return []
+    lines: list[str] = []
+    try:
+        while select.select([sys.stdin], [], [], 0)[0]:
+            line = sys.stdin.readline()
+            if not line:
+                break
+            line = line.strip()
+            if line:
+                lines.append(line)
+    except (OSError, ValueError):
+        pass
+    return lines
 
 
 def _voice(state: dict):
@@ -730,6 +788,8 @@ def main(argv: list[str] | None = None) -> int:
             from .daemon import Daemon
 
             return Daemon(agent, ui=ui).serve()
+        if args.prompt and args.auto:
+            return 0 if run_autopilot(agent, ui, " ".join(args.prompt)) else 1
         if args.prompt:
             speak = _speaker({"agent": agent, "ui": ui, "config": cfg}) if (
                 args.voice or cfg.speak_replies

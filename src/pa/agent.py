@@ -145,6 +145,67 @@ class Agent:
             self.session.add(Message.assistant(f"[{note}]"))
             yield Step("error", note, is_error=True)
 
+    # ---- autonomous goal pursuit --------------------------------------------
+
+    def autopilot(
+        self, goal: str, on_text: Callable[[str], None] | None = None,
+        max_iterations: int | None = None,
+    ) -> Iterator[Step]:
+        """Pursue a goal across many turns, on its own, until done.
+
+        Each turn already loops over tool calls; autopilot loops over *turns*:
+        it seeds a goal, tells the model to plan and work without asking the
+        user, and after each turn either sees a DONE signal (or a fully-checked
+        plan) and stops, or nudges it to continue. Bounded by an iteration
+        budget so it can never run forever.
+        """
+        budget = max_iterations or getattr(self.config, "autopilot_max", 12)
+        seed = (
+            f"AUTONOMOUS MODE. Your goal:\n\n{goal}\n\n"
+            "Work toward this goal yourself, step by step, calling tools as "
+            "needed. First set out your steps with the plan tool, then execute "
+            "them, marking each done as you finish. Do NOT ask the user "
+            "questions - make reasonable assumptions and proceed. When the goal "
+            "is fully accomplished, reply with a line that begins 'DONE:' "
+            "followed by a one-line summary of what you achieved."
+        )
+        prompt = seed
+        for iteration in range(budget):
+            yield Step("usage", f"── autopilot {iteration + 1}/{budget} ──")
+            final_text = ""
+            errored = False
+            for step in self.turn(prompt, on_text=on_text):
+                yield step
+                if step.kind == "text":
+                    final_text += step.text
+                elif step.kind == "error":
+                    errored = True
+
+            if self._goal_complete(final_text):
+                yield Step("usage", "✓ autopilot: goal complete")
+                return
+            if errored:
+                yield Step("error", "autopilot stopped on an error", is_error=True)
+                return
+            # Nudge the next iteration forward.
+            prompt = (
+                "Continue working toward the goal. Update the plan as you go. "
+                "If it is now fully accomplished, reply beginning with 'DONE:'."
+            )
+        yield Step(
+            "error",
+            f"autopilot hit its {budget}-iteration budget without a DONE. "
+            f"Raise autopilot_max or refine the goal.",
+            is_error=True,
+        )
+
+    def _goal_complete(self, text: str) -> bool:
+        """Done when the model says so, or the whole plan is checked off."""
+        if "done:" in text.lower():
+            return True
+        plan = self.ctx.state.get("plan") or []
+        return bool(plan) and all(s.get("status") == "done" for s in plan)
+
     def _complete(self, on_text):
         """One provider call, routed through the active harness.
 
