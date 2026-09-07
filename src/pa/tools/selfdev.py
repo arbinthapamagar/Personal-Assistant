@@ -193,3 +193,58 @@ class SelfRollbackTool(Tool):
 
 
 TOOLS = [SelfLocateTool, SelfCheckpointTool, SelfTestTool, SelfRollbackTool]
+
+
+class SelfReloadTool(Tool):
+    name = "self_reload"
+    group = "selfdev"
+    description = (
+        "Restart yourself so code you just edited takes effect - a running "
+        "process does not pick up its own source changes live. Run self_test "
+        "FIRST and only reload on green; reloading into broken code leaves you "
+        "unable to start. This ends the current conversation and relaunches "
+        "with the same options."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "confirm": {"type": "boolean",
+                        "description": "Must be true - reloading ends this session."},
+        },
+    }
+
+    def key(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        return "selfdev.reload"
+
+    def summary(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        return "restart yourself to load edited code"
+
+    def run(self, args: dict[str, Any], ctx: ToolContext) -> str:
+        if not args.get("confirm"):
+            raise ToolError("self_reload ends the session; pass confirm=true to proceed")
+        # Guard: never reload into code that fails its own tests.
+        root = _source_root()
+        if root is not None:
+            check = SelfTestTool().run({"target": "test_smoke.py"}, ctx)
+            if "PASSED" not in check:
+                raise ToolError(
+                    "refusing to reload: smoke tests are not passing. Fix or "
+                    "self_rollback first, or you may not restart cleanly."
+                )
+        import os
+        import sys
+
+        argv = reload_command()
+        print("\n[self_reload] restarting to load new code...\n", flush=True)
+        # Replace this process image - the cleanest reload; the OS hands the
+        # same terminal to the fresh interpreter.
+        os.execv(sys.executable, argv)
+        return "unreachable"  # execv does not return
+
+
+def reload_command() -> list[str]:
+    """Build the argv to re-launch the current process. Factored out so it can
+    be tested without actually re-executing."""
+    import sys
+
+    return [sys.executable, "-m", "pa", *sys.argv[1:]]

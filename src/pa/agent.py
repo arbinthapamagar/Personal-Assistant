@@ -150,7 +150,14 @@ class Agent:
         # prompt so the recall block is the only part that varies per turn.
         base_system = self._system
         if getattr(self, "_recall_block", ""):
-            base_system = f"{self._system}\n\n{self._recall_block}"
+            base_system = f"{base_system}\n\n{self._recall_block}"
+        # The live task plan rides in the prompt too, so the model always sees
+        # its checklist and does not lose the thread on a long task.
+        from .tools.plan import render_plan
+
+        plan_block = render_plan(self.ctx)
+        if plan_block:
+            base_system = f"{base_system}\n\n{plan_block}"
         system, messages, provider_tools = self.harness.prepare(
             base_system, list(self.session.messages), tools
         )

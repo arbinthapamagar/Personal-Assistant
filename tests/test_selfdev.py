@@ -77,3 +77,19 @@ def test_checkpoint_and_rollback_on_a_scratch_repo(tmp_path, monkeypatch, ctx):
     (repo / "src" / "pa" / "x.py").write_text("VALUE = BROKEN(\n")
     selfdev.SelfRollbackTool()({}, ctx)
     assert (repo / "src" / "pa" / "x.py").read_text() == "VALUE = 2\n"
+
+
+def test_reload_command_targets_the_package():
+    from pa.tools.selfdev import reload_command
+
+    argv = reload_command()
+    assert argv[1:3] == ["-m", "pa"]  # re-launches the package
+    assert argv[0].endswith("python") or "python" in argv[0]
+
+
+def test_reload_requires_confirmation(ctx):
+    from pa.errors import ToolError
+    from pa.tools.selfdev import SelfReloadTool
+
+    with pytest.raises(ToolError, match="confirm"):
+        SelfReloadTool()({}, ctx)

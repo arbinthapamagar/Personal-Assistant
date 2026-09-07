@@ -93,7 +93,7 @@ class Config:
     tools: list[str] = field(
         default_factory=lambda: [
             "shell", "files", "web", "skills", "tasks", "memory",
-            "agents", "voice", "selfdev", "browser", "desktop",
+            "agents", "voice", "selfdev", "plan", "browser", "desktop",
         ]
     )
     security: Security = field(default_factory=Security)
@@ -289,7 +289,7 @@ profiles:
     api_key_env: GROQ_API_KEY
 
 tools:
-  enabled: [shell, files, web, skills, tasks, memory, agents, voice, selfdev, browser, desktop]
+  enabled: [shell, files, web, skills, tasks, memory, agents, voice, selfdev, plan, browser, desktop]
   workspace: ~/             # writes outside this need confirmation
 
 security:
