@@ -82,4 +82,14 @@ def build(
 
     if config.system_prompt:
         parts.append("\nAdditional instructions from the user's config:\n" + config.system_prompt)
+
+    # Per-profile persona - lets one profile (e.g. an uncensored local model)
+    # carry its own instructions without changing the others.
+    try:
+        profile_prompt = config.profile.extra.get("system_prompt")
+    except Exception:  # noqa: BLE001 - missing profile shouldn't break prompt build
+        profile_prompt = None
+    if profile_prompt:
+        parts.append("\n" + str(profile_prompt))
+
     return "\n".join(parts)
