@@ -35,6 +35,8 @@ class UI:
         self.console = Console(no_color=plain, highlight=not plain)
         self.quiet = quiet
         self._streaming = False
+        self._live = None          # rich.live.Live during a streamed reply
+        self._stream_buf = ""      # accumulated text, re-rendered as Markdown
 
     # ---- basics -------------------------------------------------------------
 
@@ -98,18 +100,40 @@ class UI:
     # ---- streaming assistant text -------------------------------------------
 
     def stream(self, delta: str) -> None:
-        """Write a token as it arrives. Deliberately raw - Markdown cannot be
-        rendered incrementally without redrawing the whole block."""
-        if not self._streaming:
+        """Render tokens as they arrive. On a real terminal this streams as live
+        Markdown - fenced code becomes a highlighted, copy-pasteable box as soon
+        as its closing ``` arrives - by re-rendering the growing buffer in place.
+        Piped/quiet output just writes raw text so scripts stay clean."""
+        self._stream_buf += delta
+        if self._live is not None:
+            self._live.update(Markdown(self._stream_buf))
+            return
+        if self._live is None and not self._streaming and self.console.is_terminal and not self.quiet:
+            from rich.live import Live
+
+            # Live re-renders the whole Markdown each update; throttle refreshes
+            # so long replies don't thrash the terminal.
+            self._live = Live(Markdown(self._stream_buf), console=self.console,
+                              refresh_per_second=12, transient=False)
+            self._live.start()
             self._streaming = True
+            return
+        # Non-TTY / quiet: raw passthrough.
+        self._streaming = True
         self.console.file.write(delta)
         self.console.file.flush()
 
     def end_stream(self) -> None:
-        if self._streaming:
+        if self._live is not None:
+            # Final full-fidelity render, then release the Live region.
+            self._live.update(Markdown(self._stream_buf))
+            self._live.stop()
+            self._live = None
+        elif self._streaming:
             self.console.file.write("\n")
             self.console.file.flush()
-            self._streaming = False
+        self._streaming = False
+        self._stream_buf = ""
 
     # ---- agent steps --------------------------------------------------------
 
