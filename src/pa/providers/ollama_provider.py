@@ -81,7 +81,15 @@ class OllamaProvider(Provider):
             "model": self.model,
             "messages": self._to_wire(system, messages),
             "stream": stream,
-            "options": {"num_predict": self.profile.max_tokens},
+            "options": {
+                "num_predict": self.profile.max_tokens,
+                # Ollama defaults num_ctx to ~4096, which the system prompt and
+                # tool schemas alone can fill - leaving no room for conversation
+                # history, so the model "forgets" earlier turns. Give it a
+                # bigger window so history (e.g. "my name is ...") stays in
+                # context. Overridable per profile; costs some RAM in KV cache.
+                "num_ctx": int(self.profile.extra.get("num_ctx", 8192)),
+            },
             # Release the model from RAM after idle, so switching between local
             # models (e.g. dolphin 7B <-> llama 3B) frees memory for the next
             # one instead of pinning both. Overridable per profile; some

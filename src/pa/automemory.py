@@ -27,11 +27,11 @@ from dataclasses import dataclass
 # Kept intentionally narrow - a false save is worse than a missed one, because
 # it pollutes recall for every future turn.
 _CAPTURE_PATTERNS = [
-    # Name capture is case-SENSITIVE on the name itself (the prefix is not), so
-    # a capitalised name is matched but a following lowercase word like "and"
-    # is not swept in. `re.I` on the whole pattern would break that.
-    (re.compile(r"[Mm]y name is\s+([A-Z][a-z'-]+(?:\s+[A-Z][a-z'-]+)?)"), "preference"),
-    (re.compile(r"[Cc]all me\s+([A-Z][a-z'-]+)"), "preference"),
+    # Capture a single name token (case-insensitive, so lowercase "arbin"
+    # works). One token only, so "my name is arbin and i..." grabs just the
+    # name, not the trailing clause.
+    (re.compile(r"\bmy name is\s+([A-Za-z][\w'-]*)", re.I), "preference"),
+    (re.compile(r"\bcall me\s+([A-Za-z][\w'-]*)", re.I), "preference"),
     # Imperative "remember ..." anchored to the clause start, so "I don't
     # remember", "can't remember", etc. never match.
     (re.compile(r"^(?:please\s+)?remember\b(?:\s+that)?\s+(.+?)(?:[.!?]|$)", re.I), "note"),
@@ -99,7 +99,7 @@ def _phrase(pattern_src: str, fact: str, sentence: str) -> str:
     rewrite to a clean fact; otherwise keep the user's own sentence, which
     preserves meaning better than a fragment."""
     if "name is" in pattern_src or "all me" in pattern_src:
-        return f"The user's name is {fact}."
+        return f"The user's name is {fact[:1].upper() + fact[1:]}."
     # For preference/note patterns the whole sentence is the clearest record.
     return sentence.rstrip()
 

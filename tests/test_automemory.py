@@ -168,3 +168,12 @@ def test_disabling_auto_memory_skips_it(isolated_memory):
     assert "Things you remember" not in provider.systems[-1]
     assert "memory" not in agent.ctx.state
     agent.close()
+
+
+def test_lowercase_name_is_captured():
+    facts = extract_memorable("my name is arbin")
+    assert facts and facts[0].text == "The user's name is Arbin."
+    # and it doesn't sweep in a trailing clause
+    facts2 = extract_memorable("my name is arbin and i use wayland")
+    names = [f.text for f in facts2 if f.text.startswith("The user's name")]
+    assert names == ["The user's name is Arbin."]
