@@ -274,11 +274,9 @@ class Agent:
     def _tool_limit(self) -> int:
         """How many tools to show. Explicit config wins; otherwise the prompted
         harness (a weak model) gets a sane cap so it is not overwhelmed."""
-        if self.config.max_tools:
-            return self.config.max_tools
-        if self._resolved_mode == "prompted":
-            return 14
-        return 0
+        # Only an explicit config cap limits the tool list; local/prompted
+        # models get the full set like everything else.
+        return self.config.max_tools
 
     # ---- automatic memory ---------------------------------------------------
 

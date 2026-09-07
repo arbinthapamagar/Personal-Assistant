@@ -140,7 +140,10 @@ class Config:
     #: Curated tool groups used when the active provider is local, unless the
     #: user set `tools` explicitly. Keeps weak models focused.
     local_tools: list[str] = field(
-        default_factory=lambda: ["shell", "files", "web", "tasks"]
+        default_factory=lambda: [
+            "shell", "files", "web", "skills", "tasks", "memory",
+            "agents", "voice", "selfdev", "plan", "schedule", "browser", "desktop",
+        ]
     )
 
     @property
