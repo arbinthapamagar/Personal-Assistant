@@ -125,8 +125,13 @@ class UI:
 
     def end_stream(self) -> None:
         if self._live is not None:
-            # Final full-fidelity render, then release the Live region.
-            self._live.update(Markdown(self._stream_buf))
+            # If the model wrapped its whole reply in JSON, unwrap it for the
+            # final in-place render - Live replaces the streamed JSON frames
+            # with clean text, so the user never keeps the raw {"text": ...}.
+            from .harness import unwrap_json_answer
+
+            final = unwrap_json_answer(self._stream_buf)
+            self._live.update(Markdown(final))
             self._live.stop()
             self._live = None
         elif self._streaming:

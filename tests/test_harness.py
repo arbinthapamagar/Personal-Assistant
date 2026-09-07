@@ -249,3 +249,14 @@ def test_prompted_reply_is_shown_even_when_streaming_is_on(tmp_path):
     # on_text IS provided (streaming interactive path) but must not swallow text.
     texts = [s.text for s in agent.turn("hi", on_text=lambda d: None) if s.kind == "text"]
     assert any("hello from dolphin" in t for t in texts)
+
+
+def test_unwrap_json_answer():
+    from pa.harness import unwrap_json_answer as u
+    assert u('{"text": "Hello"}') == "Hello"
+    assert u('{"response": "42"}') == "42"
+    assert u('  {"answer": "yes"} ') == "yes"
+    assert u("plain stays") == "plain stays"
+    # real data and mixed objects are left intact
+    assert u('{"name": "a", "age": 5}') == '{"name": "a", "age": 5}'
+    assert u('{"text": "a", "count": 2}') == '{"text": "a", "count": 2}'

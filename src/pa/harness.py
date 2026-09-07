@@ -262,6 +262,34 @@ def looks_like_unparsed_tool_call(completion: Completion) -> bool:
     return bool(calls)
 
 
+_ANSWER_KEYS = ("text", "response", "answer", "content", "message", "output", "reply")
+
+
+def unwrap_json_answer(text: str) -> str:
+    """Some small models wrap their whole reply in JSON, e.g.
+    {"text": "Hello"} or {"response": "..."}. Unwrap that to the bare text.
+
+    Only unwraps when the object is *purely* a wrapped answer (all its keys are
+    answer-ish), so genuine JSON data the user asked for is left untouched.
+    """
+    t = text.strip()
+    if not (t.startswith("{") and t.endswith("}")):
+        return text
+    try:
+        obj = json.loads(t)
+    except json.JSONDecodeError:
+        return text
+    if not isinstance(obj, dict) or not obj:
+        return text
+    if not set(obj.keys()) <= set(_ANSWER_KEYS):
+        return text  # has non-answer keys -> real data, leave it
+    for key in _ANSWER_KEYS:
+        value = obj.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return text
+
+
 def build_harness(mode: str) -> Harness:
     if mode == "prompted":
         return PromptedHarness()

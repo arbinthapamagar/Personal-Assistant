@@ -18,7 +18,7 @@ from .capabilities import Capabilities
 from .concurrency import Job, Scheduler
 from .config import Config
 from .errors import PAError, PermissionDenied, ProviderError, RateLimitError, ToolError
-from .harness import build_harness, looks_like_unparsed_tool_call
+from .harness import build_harness, looks_like_unparsed_tool_call, unwrap_json_answer
 from .messages import Completion, Message, Text, ToolCall, ToolResult, Usage
 from .prompts import build as build_prompt
 from .providers.base import Provider
@@ -105,6 +105,11 @@ class Agent:
             # Surface any fallback switches that happened inside _complete.
             yield from self._drain_events()
             self.session.usage = self.session.usage + completion.usage
+            # Small models sometimes wrap their reply in JSON ({"text": "..."});
+            # normalise text parts to the bare answer before storing/showing.
+            for part in completion.message.parts:
+                if part.type == "text" and part.text:
+                    part.text = unwrap_json_answer(part.text)
             self.session.add(completion.message)
 
             for part in completion.message.parts:
