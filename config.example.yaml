@@ -29,7 +29,7 @@ profiles:
     api_key_env: GROQ_API_KEY
 
 tools:
-  enabled: [shell, files, web, skills, tasks, memory, agents, voice, browser, desktop]
+  enabled: [shell, files, web, skills, tasks, memory, agents, voice, selfdev, browser, desktop]
   workspace: ~/             # writes outside this need confirmation
 
 security:

@@ -198,6 +198,7 @@ _LIGHT_GROUPS = {
     "shell": "shell", "files": "files", "web_fetch": "web",
     "search": "search", "research": "research", "skills": "skills",
     "tasks": "tasks", "agents": "delegate", "desktop": "desktop", "voice": "voice",
+    "selfdev": "selfdev",
 }
 # Groups that pull a heavy optional dependency: imported only when enabled, so a
 # machine that never uses them never imports (or installs) Playwright/Chroma.
