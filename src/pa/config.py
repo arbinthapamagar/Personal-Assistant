@@ -8,6 +8,7 @@ still starts, which is what makes `git clone && install` work anywhere.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -262,6 +263,54 @@ def write_example(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(EXAMPLE)
     return path
+
+
+def persist_selection(name: str, model: str | None = None, path: Path | None = None) -> bool:
+    """Persist the active profile (and optionally its model) to the config file
+    with targeted line edits, so a `/profile` switch is remembered next launch.
+
+    Line edits rather than a YAML re-dump, so the user's comments survive. If
+    the file does not exist yet, a minimal one is created. Returns True on save.
+    """
+    path = path or paths.config_file()
+    try:
+        lines = path.read_text().splitlines() if path.exists() else []
+    except OSError:
+        return False
+
+    # 1. active_profile: replace the line, or add it at the top.
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*active_profile\s*:", line):
+            lines[i] = f"active_profile: {name}"
+            break
+    else:
+        lines.insert(0, f"active_profile: {name}")
+
+    # 2. optionally update that profile's model line, if the block exists.
+    if model:
+        in_block = False
+        block_indent = None
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            if re.match(rf"^\s*{re.escape(name)}\s*:\s*$", line):
+                in_block = True
+                block_indent = indent
+                continue
+            if in_block:
+                # left the block when indentation returns to block level or less
+                if stripped and indent <= (block_indent or 0):
+                    break
+                if re.match(r"^\s*model\s*:", line):
+                    lines[i] = " " * indent + f"model: {model}"
+                    break
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n")
+        return True
+    except OSError:
+        return False
 
 
 EXAMPLE = """\

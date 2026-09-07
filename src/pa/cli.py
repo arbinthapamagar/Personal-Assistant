@@ -289,7 +289,11 @@ def handle_command(line: str, state: dict) -> bool:
                 else:
                     agent.switch_profile(name, provider)
                     state["config"] = new_cfg
-                    ui.info(f"now using {name} -> {provider.model}")
+                    cfg = new_cfg
+                    # Persist so the next launch starts on this profile.
+                    saved = config_mod.persist_selection(name)
+                    note = "  (saved as default)" if saved else ""
+                    ui.info(f"now using {name} -> {provider.model}{note}")
     elif cmd == "model":
         target = args[0] if args else None
         if target is None:
@@ -311,7 +315,9 @@ def handle_command(line: str, state: dict) -> bool:
                 ui.error(str(exc))
             else:
                 agent.switch_profile(cfg.active_profile, provider)
-                ui.info(f"model is now {target}")
+                saved = config_mod.persist_selection(cfg.active_profile, model=target)
+                note = "  (saved as default)" if saved else ""
+                ui.info(f"model is now {target}{note}")
     elif cmd == "models":
         models = agent.provider.list_models()
         ui.console.print("\n".join(f"  {m}" for m in models) if models
