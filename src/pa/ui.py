@@ -86,6 +86,15 @@ class UI:
     def markdown(self, text: str) -> None:
         self.console.print(Markdown(text))
 
+    # ---- working spinner ----------------------------------------------------
+
+    def working(self, label: str = "thinking"):
+        """A live spinner shown while the model is loading or thinking, so a
+        slow local model reads as busy rather than frozen. Start it before the
+        wait, stop it when output begins. A no-op on a non-TTY / quiet, so
+        piped output stays clean."""
+        return _Spinner(self, label)
+
     # ---- streaming assistant text -------------------------------------------
 
     def stream(self, delta: str) -> None:
@@ -214,6 +223,45 @@ class UI:
 
     def code(self, text: str, lang: str = "yaml") -> None:
         self.console.print(Syntax(text, lang, theme="ansi_dark", background_color="default"))
+
+
+class _Spinner:
+    """Start/stop handle over Rich's Status. Safe (no-op) on a non-TTY."""
+
+    def __init__(self, ui: "UI", label: str) -> None:
+        self._ui = ui
+        self._label = label
+        self._status = None
+        self._active = False
+
+    @property
+    def _enabled(self) -> bool:
+        return not self._ui.quiet and self._ui.console.is_terminal
+
+    def start(self) -> "_Spinner":
+        if self._enabled and self._status is None:
+            self._status = self._ui.console.status(f"[cyan]{self._label}[/]", spinner="dots")
+            self._status.start()
+            self._active = True
+        return self
+
+    def update(self, label: str) -> None:
+        if self._status is not None:
+            self._status.update(f"[cyan]{label}[/]")
+
+    def stop(self) -> None:
+        if self._status is not None and self._active:
+            self._status.stop()
+        # Drop the Status so a later start() builds a fresh one (Rich's Status
+        # does not cleanly restart after stop()).
+        self._status = None
+        self._active = False
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *exc):
+        self.stop()
 
 
 def _indent(text: str, prefix: str = "   ") -> str:

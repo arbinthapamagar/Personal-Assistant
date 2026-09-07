@@ -212,10 +212,25 @@ def run_turn(agent: Agent, ui: UI, prompt: str, *, speak=None) -> bool:
     running commentary of every intermediate step would be unbearable."""
     # Voice mode listens rather than reads, so streaming tokens to screen buys
     # nothing there - turn it off so the whole reply is spoken cleanly.
-    on_text = ui.stream if (agent.config.stream and speak is None) else None
     failed = False
+    # A spinner shows the model is busy (esp. a slow local cold-load). It stops
+    # the instant any output appears - a streamed token, or the first step.
+    spinner = ui.working("thinking").start()
+    stopped = {"v": False}
+
+    def _stop_spin():
+        if not stopped["v"]:
+            spinner.stop()
+            stopped["v"] = True
+
+    def _on_text(delta: str) -> None:
+        _stop_spin()
+        ui.stream(delta)
+
+    on_text = _on_text if (agent.config.stream and speak is None) else None
     try:
         for step in agent.turn(prompt, on_text=on_text):
+            _stop_spin()  # any step means the model responded
             if step.kind in ("tool", "result", "error", "thinking"):
                 ui.end_stream()
             if step.kind == "text":
@@ -224,7 +239,10 @@ def run_turn(agent: Agent, ui: UI, prompt: str, *, speak=None) -> bool:
                 ui.thinking(step.text)
             elif step.kind == "tool":
                 ui.tool_call(step.tool, step.args)
+                # Back to spinning while the tool runs / next model call loads.
+                spinner.update("working"); stopped["v"] = False; spinner.start()
             elif step.kind == "result":
+                _stop_spin()
                 ui.tool_result(step.tool, step.text, step.is_error)
             elif step.kind == "usage":
                 ui.end_stream()
@@ -233,10 +251,12 @@ def run_turn(agent: Agent, ui: UI, prompt: str, *, speak=None) -> bool:
                 failed = True
                 ui.error(step.text)
     except KeyboardInterrupt:
+        _stop_spin()
         ui.end_stream()
         ui.warn("interrupted - the conversation is intact, ask something else")
         return False
     finally:
+        _stop_spin()
         ui.end_stream()
     if speak is not None and not failed:
         # The final assistant message is the answer; read that, not the

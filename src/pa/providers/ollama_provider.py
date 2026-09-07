@@ -82,6 +82,11 @@ class OllamaProvider(Provider):
             "messages": self._to_wire(system, messages),
             "stream": stream,
             "options": {"num_predict": self.profile.max_tokens},
+            # Release the model from RAM after idle, so switching between local
+            # models (e.g. dolphin 7B <-> llama 3B) frees memory for the next
+            # one instead of pinning both. Overridable per profile; some
+            # machines set OLLAMA_KEEP_ALIVE=-1 globally, which this defeats.
+            "keep_alive": self.profile.extra.get("keep_alive", "5m"),
         }
         if tools:
             body["tools"] = [
