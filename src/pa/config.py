@@ -125,6 +125,11 @@ class Config:
         default_factory=lambda: {"enabled": True, "recall_k": 4,
                                  "min_score": 0.6, "capture": True}
     )
+    #: Reflection: after a task, distil one lesson to memory. {enabled, min_tools}.
+    #: Off by default - it costs one extra model call per completed task.
+    reflect: dict[str, Any] = field(
+        default_factory=lambda: {"enabled": False, "min_tools": 2}
+    )
     #: Tool-calling strategy: "auto" (native, self-healing to prompted for weak
     #: local models), "native", or "prompted".
     harness: str = "auto"
@@ -205,6 +210,8 @@ def load(path: Path | None = None, overrides: dict[str, Any] | None = None) -> C
             cfg.voice = {**cfg.voice, **raw["voice"]}
         if isinstance(raw.get("auto_memory"), dict):
             cfg.auto_memory = {**cfg.auto_memory, **raw["auto_memory"]}
+        if isinstance(raw.get("reflect"), dict):
+            cfg.reflect = {**cfg.reflect, **raw["reflect"]}
         if isinstance(raw.get("tor"), dict):
             cfg.tor = {**cfg.tor, **raw["tor"]}
         if "speak_replies" in raw:

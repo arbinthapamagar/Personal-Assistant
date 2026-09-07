@@ -90,6 +90,7 @@ class Agent:
             yield Step("usage", f"recalled {self._recall_block.count(chr(10))} memories")
         self._auto_capture(user_input)
 
+        tools_used = 0
         for step_index in range(self.config.max_steps):
             try:
                 completion = self._complete(on_text)
@@ -120,8 +121,11 @@ class Agent:
             calls = completion.message.tool_calls
             if not calls:
                 self._persist()
+                # The turn is done - reflect on it and bank any lesson learned.
+                yield from self._reflect(user_input, tools_used)
                 return
 
+            tools_used += len(calls)
             # Announce every call before any of them runs, so the user can see
             # the whole batch that is about to execute concurrently.
             for call in calls:
@@ -332,6 +336,58 @@ class Agent:
                 memory.remember(fact.text, kind=fact.kind, tags=["auto"])
             except Exception:  # noqa: BLE001 - capture is best-effort
                 continue
+
+    # ---- reflection (learning from experience) ------------------------------
+
+    def _reflect(self, user_input: str, tools_used: int) -> Iterator[Step]:
+        """After a real task, distil one durable lesson and save it to memory.
+
+        Off by default (it costs one extra model call), and only fires after a
+        turn that did enough work to be worth learning from. The model is asked
+        for a single reusable lesson or NONE, so it saves signal, not chatter.
+        """
+        settings = self.config.reflect or {}
+        if not settings.get("enabled", False):
+            return
+        if tools_used < int(settings.get("min_tools", 2)):
+            return
+        memory = self._memory()
+        if memory is None:
+            return
+
+        answer = ""
+        for message in reversed(self.session.messages):
+            if message.role == "assistant" and message.text.strip():
+                answer = message.text
+                break
+        prompt = (
+            "Reflect on the task you just finished. In ONE sentence, state a "
+            "durable, reusable lesson worth remembering for similar future "
+            "tasks - a gotcha, a working approach, a fact about this machine or "
+            "project. If there is nothing genuinely worth remembering, reply "
+            "with exactly NONE.\n\n"
+            f"Task: {user_input[:500]}\nOutcome: {answer[:800]}"
+        )
+        try:
+            completion = self.provider.complete(
+                system="You distil concise, reusable lessons. Reply with one "
+                       "sentence, or NONE.",
+                messages=[Message.user(prompt)],
+                tools=(),
+            )
+        except PAError:
+            return  # reflection is a bonus, never fail the turn over it
+        lesson = completion.message.text.strip()
+        if not lesson or lesson.upper().startswith("NONE") or len(lesson) < 12:
+            return
+        try:
+            existing = memory.recall(lesson, k=1)
+            if existing and existing[0].score > 0.9:
+                return  # already learned this
+            memory.remember(lesson, kind="lesson", tags=["reflection"])
+            yield Step("usage", f"learned: {lesson[:80]}")
+        except Exception:  # noqa: BLE001
+            return
 
     # ---- tool execution -----------------------------------------------------
 
