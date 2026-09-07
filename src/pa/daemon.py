@@ -97,6 +97,12 @@ class Daemon:
         self._log(f"listening on {path} (pid {os.getpid()})")
         self._notify("arbin-assistant daemon started", "Reach it with: arbin-assistant --daemon \"...\"")
 
+        # Autonomous scheduler: fire due jobs on their cadence, if a state
+        # backend is present to hold them.
+        if self.agent.ctx.store is not None:
+            threading.Thread(target=self._scheduler_loop, daemon=True).start()
+            self._log("scheduler running")
+
         try:
             while not self._stop.is_set():
                 try:
@@ -111,6 +117,48 @@ class Daemon:
         finally:
             self._cleanup()
         return 0
+
+    def _scheduler_loop(self) -> None:
+        """Wake ~every 30s, run any due scheduled jobs as non-interactive turns,
+        and store their output. Serialised through the same turn lock as socket
+        requests, so a scheduled run and a user request never overlap."""
+        from .scheduler import ScheduleStore
+
+        store = ScheduleStore(self.agent.ctx.store)
+        while not self._stop.wait(30):
+            try:
+                due = store.due()
+            except Exception:  # noqa: BLE001 - a store hiccup must not kill the loop
+                continue
+            for job in due:
+                if self._stop.is_set():
+                    break
+                self._run_scheduled(store, job)
+
+    def _run_scheduled(self, store, job) -> None:
+        from .scheduler import COLLECTION
+
+        with self._turn_lock:
+            self._log(f"scheduled job {job.id} firing: {job.prompt[:60]}")
+            # A scheduled turn cannot answer approval prompts, so it runs under
+            # the gate's policy (unmatched calls are denied) - never silently.
+            self.agent.ctx.approve = lambda k, d: False
+            answer, status = "", "ok"
+            try:
+                for step in self.agent.turn(job.prompt):
+                    if step.kind == "text":
+                        answer = step.text
+                    elif step.kind == "error":
+                        status = "error"
+            except Exception as exc:  # noqa: BLE001
+                status = f"failed: {type(exc).__name__}"
+            store.mark_ran(job, status)
+            # Save the run's output where it can be read back later.
+            self.agent.ctx.store.put(
+                f"{COLLECTION}_runs", f"{job.id}-{job.runs}",
+                {"job": job.id, "at": job.last_run, "status": status, "answer": answer[:4000]},
+            )
+            self._notify(f"scheduled: {job.prompt[:40]}", (answer or status)[:120])
 
     def _cleanup(self) -> None:
         if self._server is not None:
