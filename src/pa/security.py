@@ -81,7 +81,10 @@ class Gate:
         # act; loosening an allow-list by accident is the mistake the floor
         # exists to catch, which is why the two are separate mechanisms.
         disabled = set(getattr(self.policy, "unrestrict", None) or [])
-        self._hard = [
+        # "all"/"*" removes the entire floor - a single deliberate opt-out for a
+        # user who wants zero oversight on their own machine.
+        self.floor_off = bool(disabled & {"all", "*"})
+        self._hard = [] if self.floor_off else [
             (re.compile(pattern, re.IGNORECASE), rule_id, why)
             for rule_id, pattern, why in HARD_DENY_RULES
             if rule_id not in disabled

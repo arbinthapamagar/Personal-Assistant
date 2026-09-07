@@ -110,8 +110,21 @@ class Config:
     search: dict[str, Any] = field(default_factory=lambda: {"backend": "duckduckgo"})
     #: Voice config: {tts_backend, voice_model?, stt_model, rate, silence_end, ...}.
     voice: dict[str, Any] = field(default_factory=dict)
+    #: Tor routing for web tools: {enabled, auto_onion, socks}. .onion always
+    #: routes through Tor; `enabled` sends all web traffic through it.
+    tor: dict[str, Any] = field(default_factory=dict)
     #: Speak assistant replies aloud automatically in interactive mode.
     speak_replies: bool = False
+    #: Profile names to fall back to, in order, when the active model is rate-
+    #: limited or out of quota. The switch is transparent and sticks for the
+    #: session. End the chain with a local profile so it never dead-ends.
+    fallback: list[str] = field(default_factory=list)
+    #: Automatic memory (RAG): recall relevant notes each turn, capture facts.
+    #: {enabled, recall_k, min_score, capture}. Off if chromadb is absent.
+    auto_memory: dict[str, Any] = field(
+        default_factory=lambda: {"enabled": True, "recall_k": 4,
+                                 "min_score": 0.6, "capture": True}
+    )
     #: Tool-calling strategy: "auto" (native, self-healing to prompted for weak
     #: local models), "native", or "prompted".
     harness: str = "auto"
@@ -190,6 +203,10 @@ def load(path: Path | None = None, overrides: dict[str, Any] | None = None) -> C
             cfg.search = {**cfg.search, **raw["search"]}
         if isinstance(raw.get("voice"), dict):
             cfg.voice = {**cfg.voice, **raw["voice"]}
+        if isinstance(raw.get("auto_memory"), dict):
+            cfg.auto_memory = {**cfg.auto_memory, **raw["auto_memory"]}
+        if isinstance(raw.get("tor"), dict):
+            cfg.tor = {**cfg.tor, **raw["tor"]}
         if "speak_replies" in raw:
             cfg.speak_replies = bool(raw["speak_replies"])
         if isinstance(raw.get("security"), dict):
@@ -199,6 +216,8 @@ def load(path: Path | None = None, overrides: dict[str, Any] | None = None) -> C
             if unknown:
                 raise ConfigError(f"{path}: unknown security keys: {', '.join(sorted(unknown))}")
             cfg.security = Security(**{**cfg.security.__dict__, **sec})
+        if isinstance(raw.get("fallback"), list):
+            cfg.fallback = [str(x) for x in raw["fallback"]]
         for key in (
             "system_prompt", "max_steps", "auto_install_deps", "stream",
             "max_parallel_tools", "state_backend", "redis_url",
@@ -300,8 +319,30 @@ redis_url: redis://localhost:6379/0
 # Web search backend for the web_search tool.
 search:
   backend: duckduckgo       # duckduckgo (no key) | searxng | brave
-  # base_url: http://localhost:8888     # for searxng
-  # api_key_env: BRAVE_API_KEY          # for brave
+  # DuckDuckGo is free but rate-limits under heavy use. For unlimited search,
+  # run a local SearxNG (docker run searxng/searxng) and point at it:
+  # backend: searxng
+  # base_url: http://localhost:8888
+  # or use Brave's API:
+  # backend: brave
+  # api_key_env: BRAVE_API_KEY
+
+# Automatic memory: recall relevant past notes each turn, and capture facts
+# the user states ("my name is...", "I prefer...", "remember that..."). Local,
+# no extra model call. Needs the `memory` tool group (chromadb).
+auto_memory:
+  enabled: true
+  recall_k: 4               # how many recalled notes to inject per turn
+  min_score: 0.6            # similarity floor (0-1); ~0.6 fits MiniLM's range
+  capture: true             # auto-save durable facts the user states
+
+# Tor: route web fetching/searching through Tor. .onion URLs always use it.
+# Turning it on gives a fresh exit IP per circuit (beats search rate-limits)
+# and reach to blocked/onion sites. Slower. Needs the tor service running.
+tor:
+  enabled: false            # true = route ALL web traffic through Tor
+  auto_onion: true          # always route .onion URLs through Tor
+  socks: socks5h://127.0.0.1:9050
 
 # Voice: local speech in and out. Talk with `pa --voice`, or /voice in the REPL.
 speak_replies: false        # also speak every reply aloud in text mode

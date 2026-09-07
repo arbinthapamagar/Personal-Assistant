@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "personal-assistant"
+name = "arbin-assistant"
 version = "0.1.0"
 description = "Provider-agnostic AI agent that drives your terminal, browser, and desktop"
 requires-python = ">=3.10"
@@ -31,6 +31,8 @@ all = [
 ]
 
 [project.scripts]
+arbin-assistant = "pa.cli:main"
+arbin = "pa.cli:main"
 pa = "pa.cli:main"
 
 [tool.setuptools.packages.find]

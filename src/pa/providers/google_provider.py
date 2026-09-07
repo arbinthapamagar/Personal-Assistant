@@ -89,7 +89,14 @@ class GoogleProvider(Provider):
                     if part.text:
                         parts.append({"text": part.text})
                 elif isinstance(part, ToolCall):
-                    parts.append({"functionCall": {"name": part.name, "args": part.arguments}})
+                    call_part: dict[str, Any] = {
+                        "functionCall": {"name": part.name, "args": part.arguments}
+                    }
+                    # Thinking Gemini models attach a thought_signature to each
+                    # call and reject the next turn unless it is echoed back.
+                    if part.meta and part.meta.get("thought_signature"):
+                        call_part["thoughtSignature"] = part.meta["thought_signature"]
+                    parts.append(call_part)
                 elif isinstance(part, ToolResult):
                     # Gemini keys results by name; our ids are "name:index".
                     name = part.call_id.rsplit(":", 1)[0]
@@ -145,7 +152,10 @@ class GoogleProvider(Provider):
             elif "functionCall" in raw:
                 call = raw["functionCall"]
                 name = call.get("name", "")
-                parts.append(ToolCall(f"{name}:{counter}", name, call.get("args") or {}))
+                meta = None
+                if sig := raw.get("thoughtSignature"):
+                    meta = {"thought_signature": sig}
+                parts.append(ToolCall(f"{name}:{counter}", name, call.get("args") or {}, meta=meta))
                 counter += 1
 
         meta = payload.get("usageMetadata") or {}
@@ -180,15 +190,32 @@ class GoogleProvider(Provider):
     ) -> Completion:
         body = self._body(system, messages, tools)
         params = {"key": self._key}
-        try:
-            if self.config.stream and on_text is not None:
-                return self._stream(body, params, on_text)
-            url = f"{self._base}/models/{self.model}:generateContent"
-            resp = self._http.post(url, params=params, json=body)
-            self._raise_for_status(resp)
-            return self._from_wire(resp.json())
-        except httpx.HTTPError as exc:
-            raise ProviderError(f"Gemini request failed: {exc}") from exc
+        # 429 (rate limit) and 503 (model overloaded) are transient and common
+        # on the free tier, so ride them out with exponential backoff rather
+        # than failing the turn. Other errors raise immediately.
+        import time
+
+        attempts = 5
+        for attempt in range(attempts):
+            try:
+                if self.config.stream and on_text is not None:
+                    return self._stream(body, params, on_text)
+                url = f"{self._base}/models/{self.model}:generateContent"
+                resp = self._http.post(url, params=params, json=body)
+                self._raise_for_status(resp)
+                return self._from_wire(resp.json())
+            except RateLimitError:
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(min(2 ** attempt, 20))
+            except ProviderError as exc:
+                if "503" in str(exc) and attempt < attempts - 1:
+                    time.sleep(min(2 ** attempt, 20))
+                    continue
+                raise
+            except httpx.HTTPError as exc:
+                raise ProviderError(f"Gemini request failed: {exc}") from exc
+        raise ProviderError("Gemini: exhausted retries")
 
     def _stream(self, body, params, on_text: TextSink) -> Completion:
         url = f"{self._base}/models/{self.model}:streamGenerateContent"
@@ -222,7 +249,12 @@ class GoogleProvider(Provider):
                     elif "functionCall" in raw:
                         call = raw["functionCall"]
                         name = call.get("name", "")
-                        calls.append(ToolCall(f"{name}:{counter}", name, call.get("args") or {}))
+                        meta = None
+                        if sig := raw.get("thoughtSignature"):
+                            meta = {"thought_signature": sig}
+                        calls.append(
+                            ToolCall(f"{name}:{counter}", name, call.get("args") or {}, meta=meta)
+                        )
                         counter += 1
 
         completion = self._from_wire(merged or {})

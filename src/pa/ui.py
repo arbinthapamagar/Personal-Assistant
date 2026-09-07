@@ -10,7 +10,8 @@ import json
 import sys
 from typing import Any
 
-from rich.console import Console
+from rich.align import Align
+from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
@@ -18,6 +19,15 @@ from rich.table import Table
 from rich.text import Text as RichText
 
 from .security import Verdict, generalize
+
+# A compact wordmark shown at startup. Kept small so it fits an 80-column
+# terminal and does not dominate the screen on every launch.
+_WORDMARK = r"""
+  __ _ _ __| |__ (_)_ __
+ / _` | '__| '_ \| | '_ \
+| (_| | |  | |_) | | | | |
+ \__,_|_|  |_.__/|_|_| |_|   assistant
+"""
 
 
 class UI:
@@ -29,14 +39,37 @@ class UI:
     # ---- basics -------------------------------------------------------------
 
     def banner(self, profile: str, model: str, tools: int, session: str) -> None:
+        """A welcome card: the wordmark, what it is, and how to start."""
         if self.quiet:
             return
-        self.console.print(
-            f"[bold]personal assistant[/]  "
-            f"[cyan]{profile}[/]:[dim]{model}[/]  "
-            f"[dim]{tools} tools  session {session}[/]"
+        wordmark = RichText(_WORDMARK.strip("\n"), style="bold cyan")
+        subtitle = RichText("your local AI assistant", style="dim italic")
+        status = RichText.assemble(
+            ("model  ", "dim"), (f"{profile}", "bold green"), (" · ", "dim"),
+            (f"{model}\n", "green"),
+            ("tools  ", "dim"), (f"{tools} ready", "bold"), (" · ", "dim"),
+            (f"session {session[:8]}", "dim"),
         )
-        self.console.print("[dim]/help for commands, /quit to exit[/]\n")
+        hints = RichText.assemble(
+            ("type your request and press Enter\n", "white"),
+            ("/help", "cyan"), (" commands   ", "dim"),
+            ("/profile", "cyan"), (" switch model   ", "dim"),
+            ("/voice", "cyan"), (" talk   ", "dim"),
+            ("/quit", "cyan"), (" exit", "dim"),
+        )
+        body = Group(
+            Align.center(wordmark),
+            Align.center(subtitle),
+            RichText(""),
+            status,
+            RichText(""),
+            hints,
+        )
+        self.console.print(
+            Panel(body, border_style="cyan", padding=(1, 3), title="[bold]arbin-assistant[/]",
+                  title_align="left")
+        )
+        self.console.print()
 
     def info(self, text: str) -> None:
         self.console.print(f"[dim]{text}[/]")
@@ -104,8 +137,8 @@ class UI:
         """Ask the user about one tool call.
 
         Returns (decision, pattern) where decision is one of
-        "once" | "always" | "skip" | "never". The caller applies it to the gate -
-        the UI does not mutate policy itself.
+        "once" | "always" | "skip" | "never". On a real terminal this is an
+        arrow-key menu; piped or non-interactive it falls back to y/a/n/d text.
         """
         pattern = generalize(key)
         self.console.print()
@@ -121,11 +154,26 @@ class UI:
                 expand=False,
             )
         )
+
+        from . import tui
+
+        if tui.interactive():
+            choice = tui.select(
+                "",
+                [
+                    tui.Choice("once", "Yes, run it once"),
+                    tui.Choice("always", "Yes, and don't ask again", f"for {pattern}"),
+                    tui.Choice("skip", "No, skip this"),
+                    tui.Choice("never", "No, and never allow this", f"for {pattern}"),
+                ],
+                footer="↑/↓ move · enter select · esc = skip",
+            )
+            return (choice or "skip"), pattern
+
+        # Fallback for pipes / non-TTY: the original single-key prompt.
         self.console.print(
-            f"  [green]y[/] run once   "
-            f"[green]a[/] always allow [cyan]{pattern}[/]   "
-            f"[red]n[/] skip   "
-            f"[red]d[/] always deny [cyan]{pattern}[/]"
+            f"  [green]y[/] once   [green]a[/] always [cyan]{pattern}[/]   "
+            f"[red]n[/] skip   [red]d[/] never [cyan]{pattern}[/]"
         )
         while True:
             try:
@@ -142,6 +190,17 @@ class UI:
             if answer in ("d", "deny"):
                 return "never", pattern
             self.console.print("  [dim]answer y, a, n, or d[/]")
+
+    def choose(self, title: str, options: list[tuple[str, str]], *,
+               footer: str = "") -> str | None:
+        """Generic arrow-key picker. `options` is [(key, label), ...]. Returns
+        the chosen key, or None if cancelled / non-interactive."""
+        from . import tui
+
+        if not tui.interactive():
+            return None
+        choices = [tui.Choice(k, label) for k, label in options]
+        return tui.select(title, choices, footer=footer or "↑/↓ move · enter select · esc cancel")
 
     # ---- tables -------------------------------------------------------------
 

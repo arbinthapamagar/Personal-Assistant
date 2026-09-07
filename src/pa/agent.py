@@ -17,7 +17,7 @@ from typing import Callable, Iterator
 from .capabilities import Capabilities
 from .concurrency import Job, Scheduler
 from .config import Config
-from .errors import PAError, PermissionDenied, ProviderError, ToolError
+from .errors import PAError, PermissionDenied, ProviderError, RateLimitError, ToolError
 from .harness import build_harness, looks_like_unparsed_tool_call
 from .messages import Completion, Message, Text, ToolCall, ToolResult, Usage
 from .prompts import build as build_prompt
@@ -67,6 +67,14 @@ class Agent:
         ctx.state.setdefault("skills", self.skills)
         ctx.state["session_id"] = self.session.id
         self._system = build_prompt(config, caps, registry.names(), self.skills)
+        # Fallback chain: profile names still to try when the current model is
+        # rate-limited. Consumed as we fall through them this session.
+        self._fallback_remaining = [
+            name for name in config.fallback if name in config.profiles
+        ]
+        #: Info steps queued by inner calls (e.g. a fallback switch) for turn()
+        #: to surface to the UI.
+        self._events: list[Step] = []
 
     # ---- one user turn ------------------------------------------------------
 
@@ -76,16 +84,25 @@ class Agent:
         """Run until the model stops calling tools. Yields Steps as they happen."""
         self.session.add(Message.user(user_input))
 
+        # Auto-memory: recall relevant notes for this turn, capture new facts.
+        self._recall_block = self._auto_recall(user_input)
+        if self._recall_block:
+            yield Step("usage", f"recalled {self._recall_block.count(chr(10))} memories")
+        self._auto_capture(user_input)
+
         for step_index in range(self.config.max_steps):
             try:
                 completion = self._complete(on_text)
             except ProviderError as exc:
+                yield from self._drain_events()
                 yield Step("error", str(exc), is_error=True)
                 return
             except KeyboardInterrupt:
                 yield Step("error", "interrupted", is_error=True)
                 return
 
+            # Surface any fallback switches that happened inside _complete.
+            yield from self._drain_events()
             self.session.usage = self.session.usage + completion.usage
             self.session.add(completion.message)
 
@@ -128,13 +145,19 @@ class Agent:
         session to the prompted harness and retry once. After that the mode is
         fixed for the session, so the cost is paid at most once."""
         tools = self.registry.specs(self.ctx, limit=self._tool_limit())
+        # Recalled memory rides in the system prompt for this turn only, so it
+        # never accumulates in the stored history. Placed after the stable
+        # prompt so the recall block is the only part that varies per turn.
+        base_system = self._system
+        if getattr(self, "_recall_block", ""):
+            base_system = f"{self._system}\n\n{self._recall_block}"
         system, messages, provider_tools = self.harness.prepare(
-            self._system, list(self.session.messages), tools
+            base_system, list(self.session.messages), tools
         )
         # Streaming tokens are meaningless once we may re-parse the whole text,
         # so only stream under the native harness.
         stream_sink = on_text if self._resolved_mode == "native" else None
-        completion = self.provider.complete(
+        completion = self._provider_complete(
             system=system, messages=messages, tools=provider_tools, on_text=stream_sink
         )
         completion = self.harness.interpret(completion)
@@ -150,11 +173,56 @@ class Agent:
             system, messages, provider_tools = self.harness.prepare(
                 self._system, list(self.session.messages), tools
             )
-            completion = self.provider.complete(
+            completion = self._provider_complete(
                 system=system, messages=messages, tools=provider_tools, on_text=None
             )
             completion = self.harness.interpret(completion)
         return completion
+
+    def _provider_complete(self, **kwargs) -> Completion:
+        """Call the provider, falling through the fallback chain on a rate
+        limit. The first model that answers becomes this session's provider, so
+        a daily-capped free-tier model is left behind for good rather than
+        retried on every turn."""
+        while True:
+            try:
+                return self.provider.complete(**kwargs)
+            except RateLimitError as exc:
+                nxt = self._advance_fallback()
+                if nxt is None:
+                    raise
+                self._events.append(Step(
+                    "error",
+                    f"{self.provider.model} is rate-limited/out of quota - "
+                    f"switching to {nxt!r}",
+                    is_error=True,
+                ))
+                self._switch_fallback(nxt)
+
+    def _drain_events(self) -> Iterator[Step]:
+        while self._events:
+            yield self._events.pop(0)
+
+    def _advance_fallback(self) -> str | None:
+        while self._fallback_remaining:
+            name = self._fallback_remaining.pop(0)
+            if name != self.config.active_profile:
+                return name
+        return None
+
+    def _switch_fallback(self, name: str) -> None:
+        from .providers import build as build_provider
+
+        profile = self.config.profiles[name]
+        provider = build_provider(profile, self.config)
+        self.provider.close()
+        self.provider = provider
+        self.config = self.config.with_profile(name)
+        self.session.model = provider.model
+        # A different model may need a different harness; let auto re-detect.
+        if self.harness_mode == "auto":
+            self._resolved_mode = "native"
+            self.harness = build_harness("native")
 
     def _tool_limit(self) -> int:
         """How many tools to show. Explicit config wins; otherwise the prompted
@@ -164,6 +232,67 @@ class Agent:
         if self._resolved_mode == "prompted":
             return 14
         return 0
+
+    # ---- automatic memory ---------------------------------------------------
+
+    def _memory(self):
+        """The shared Memory instance, or None if unavailable. Cached on ctx so
+        the tools and auto-memory use the same store."""
+        settings = self.config.auto_memory or {}
+        if not settings.get("enabled", True):
+            return None
+        memory = self.ctx.state.get("memory")
+        if memory is None:
+            from .memory import Memory
+
+            memory = Memory(auto_install=self.config.auto_install_deps)
+            if not memory.available():
+                # Do not trigger an install just for auto-recall; it is a bonus,
+                # not a requirement. The explicit memory tools can still install.
+                return None
+            self.ctx.state["memory"] = memory
+        return memory
+
+    def _auto_recall(self, user_input: str) -> str:
+        """Find notes relevant to this turn and format them for the prompt."""
+        if len(user_input.strip()) < 8:
+            return ""  # too short to match anything meaningfully
+        memory = self._memory()
+        if memory is None:
+            return ""
+        settings = self.config.auto_memory
+        try:
+            hits = memory.recall(user_input, k=int(settings.get("recall_k", 4)))
+        except Exception:  # noqa: BLE001 - recall is best-effort, never fatal
+            return ""
+        floor = float(settings.get("min_score", 0.35))
+        hits = [h for h in hits if h.score >= floor]
+        from .automemory import format_recall
+
+        return format_recall(hits)
+
+    def _auto_capture(self, user_input: str) -> None:
+        """Save durable facts the user explicitly stated this turn."""
+        if not (self.config.auto_memory or {}).get("capture", True):
+            return
+        from .automemory import extract_memorable
+
+        facts = extract_memorable(user_input)
+        if not facts:
+            return
+        memory = self._memory()
+        if memory is None:
+            return
+        for fact in facts:
+            try:
+                # Skip a near-duplicate already remembered, so repeating a
+                # preference does not pile up copies.
+                existing = memory.recall(fact.text, k=1)
+                if existing and existing[0].score > 0.9:
+                    continue
+                memory.remember(fact.text, kind=fact.kind, tags=["auto"])
+            except Exception:  # noqa: BLE001 - capture is best-effort
+                continue
 
     # ---- tool execution -----------------------------------------------------
 

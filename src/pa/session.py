@@ -23,7 +23,10 @@ def _part_to_json(part: Any) -> dict[str, Any] | None:
     if isinstance(part, Text):
         return {"t": "text", "text": part.text}
     if isinstance(part, ToolCall):
-        return {"t": "call", "id": part.id, "name": part.name, "args": part.arguments}
+        call = {"t": "call", "id": part.id, "name": part.name, "args": part.arguments}
+        if part.meta:
+            call["meta"] = part.meta
+        return call
     if isinstance(part, ToolResult):
         return {
             "t": "result",
@@ -43,7 +46,7 @@ def _part_from_json(raw: dict[str, Any]) -> Any:
     if kind == "text":
         return Text(raw.get("text", ""))
     if kind == "call":
-        return ToolCall(raw["id"], raw["name"], raw.get("args") or {})
+        return ToolCall(raw["id"], raw["name"], raw.get("args") or {}, meta=raw.get("meta"))
     if kind == "result":
         return ToolResult(raw["id"], raw.get("content", ""), bool(raw.get("error")))
     if kind == "image":

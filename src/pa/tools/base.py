@@ -196,8 +196,8 @@ class Registry:
 # Groups whose import is cheap and dependency-free: loaded eagerly.
 _LIGHT_GROUPS = {
     "shell": "shell", "files": "files", "web_fetch": "web",
-    "search": "search", "skills": "skills", "tasks": "tasks", "agents": "delegate",
-    "desktop": "desktop", "voice": "voice",
+    "search": "search", "research": "research", "skills": "skills",
+    "tasks": "tasks", "agents": "delegate", "desktop": "desktop", "voice": "voice",
 }
 # Groups that pull a heavy optional dependency: imported only when enabled, so a
 # machine that never uses them never imports (or installs) Playwright/Chroma.
@@ -206,7 +206,7 @@ _HEAVY_GROUPS = {
     "memory": "memory",     # Chroma
 }
 # "web" is a convenience alias enabling both fetch and search.
-_ALIASES = {"web": ["web_fetch", "search"]}
+_ALIASES = {"web": ["web_fetch", "search", "research"]}
 
 
 def build_registry(config: Config, caps: Capabilities) -> Registry:

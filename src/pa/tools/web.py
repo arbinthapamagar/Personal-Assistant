@@ -48,6 +48,7 @@ class FetchTool(Tool):
         "properties": {
             "url": {"type": "string"},
             "raw": {"type": "boolean", "description": "Return the body unconverted."},
+            "tor": {"type": "boolean", "description": "Route this fetch through Tor."},
         },
         "required": ["url"],
     }
@@ -62,15 +63,17 @@ class FetchTool(Tool):
         url = args["url"]
         if "://" not in url:
             url = f"https://{url}"
+        from .. import net
+
+        # .onion always routes through Tor; normal URLs use it only when the
+        # per-call flag or the config switch is on.
+        proxy = net.use_tor_for(url, ctx.config, force=args.get("tor"))
         try:
-            with httpx.Client(
-                follow_redirects=True,
-                timeout=30.0,
-                headers={"User-Agent": "personal-assistant/0.1"},
-            ) as client:
+            with net.client(proxy=proxy, timeout=45.0 if proxy else 30.0) as client:
                 resp = client.get(url)
         except httpx.HTTPError as exc:
-            raise ToolError(f"fetch failed: {exc}") from exc
+            hint = " (Tor may need a moment to build a circuit)" if proxy else ""
+            raise ToolError(f"fetch failed: {exc}{hint}") from exc
 
         if resp.status_code >= 400:
             raise ToolError(f"HTTP {resp.status_code} from {url}")

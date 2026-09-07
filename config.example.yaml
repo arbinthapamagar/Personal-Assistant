@@ -45,6 +45,10 @@ security:
 
 max_steps: 40               # tool-call budget per user turn
 max_parallel_tools: 8       # how many tool calls run at once in a batch
+harness: auto               # auto | native | prompted - how tools are called
+                            #   auto self-heals to prompted for weak local models
+max_tools: 0                # cap tools shown to the model (0 = no cap); small
+                            #   local models do better with a handful
 auto_install_deps: true     # fetch optional packages on first use
 stream: true
 
@@ -55,8 +59,30 @@ redis_url: redis://localhost:6379/0
 # Web search backend for the web_search tool.
 search:
   backend: duckduckgo       # duckduckgo (no key) | searxng | brave
-  # base_url: http://localhost:8888     # for searxng
-  # api_key_env: BRAVE_API_KEY          # for brave
+  # DuckDuckGo is free but rate-limits under heavy use. For unlimited search,
+  # run a local SearxNG (docker run searxng/searxng) and point at it:
+  # backend: searxng
+  # base_url: http://localhost:8888
+  # or use Brave's API:
+  # backend: brave
+  # api_key_env: BRAVE_API_KEY
+
+# Automatic memory: recall relevant past notes each turn, and capture facts
+# the user states ("my name is...", "I prefer...", "remember that..."). Local,
+# no extra model call. Needs the `memory` tool group (chromadb).
+auto_memory:
+  enabled: true
+  recall_k: 4               # how many recalled notes to inject per turn
+  min_score: 0.6            # similarity floor (0-1); ~0.6 fits MiniLM's range
+  capture: true             # auto-save durable facts the user states
+
+# Tor: route web fetching/searching through Tor. .onion URLs always use it.
+# Turning it on gives a fresh exit IP per circuit (beats search rate-limits)
+# and reach to blocked/onion sites. Slower. Needs the tor service running.
+tor:
+  enabled: false            # true = route ALL web traffic through Tor
+  auto_onion: true          # always route .onion URLs through Tor
+  socks: socks5h://127.0.0.1:9050
 
 # Voice: local speech in and out. Talk with `pa --voice`, or /voice in the REPL.
 speak_replies: false        # also speak every reply aloud in text mode

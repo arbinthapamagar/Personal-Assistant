@@ -1,4 +1,6 @@
-# Personal Assistant
+# arbin-assistant
+
+> The command is **`arbin-assistant`** (short aliases: `arbin`, `pa`). Examples below use `pa` for brevity — all three are the same program.
 
 An AI agent that runs on your own machine and is driven from your terminal. It
 can run shell commands, read and edit files, drive Chrome, and control your
@@ -31,6 +33,10 @@ Two of them: PersonalAssistant has 3 modified files, invoice-tool has 1 untracke
 - **Memory** — `memory_save` / `memory_search` carry knowledge between
   sessions; `code_index` / `code_search` find code by meaning. Both run on a
   local vector database with CPU embeddings — nothing leaves the machine.
+- **Automatic memory (RAG)** — it recalls relevant past notes on its own at the
+  start of every turn, and captures durable facts you state ("my name is…",
+  "I prefer…", "remember that…") without being asked. Learns you across
+  sessions, entirely locally, with no extra model call.
 - **Skills** — playbooks (`coding`, `debugging`, `research`, `parallel-work`,
   `security-testing`, `shell-ops`, `voice`) the agent loads on demand, and you
   can add your own.
@@ -40,6 +46,10 @@ Two of them: PersonalAssistant has 3 modified files, invoice-tool has 1 untracke
 - **Daemon** — one warm agent (models, memory, browser, tasks all live) reachable
   from any terminal, script, or keyboard shortcut over a private socket. Install
   it as a systemd user service and it is always there: `pa --install-service`.
+- **Runs on local models** — a tool harness that makes small local models
+  (Ollama) actually usable: it parses tool calls even when a weak model writes
+  them as text instead of using the tool API, and trims the tool list so a 3B
+  model is not overwhelmed. Fully offline, no key: `pa -p local`.
 
 ## Install
 
@@ -99,6 +109,39 @@ Supported `provider` values: `anthropic`, `openai`, `google`, `ollama`, and
 `openai-compat` for anything else speaking the OpenAI wire format (Groq,
 Together, OpenRouter, vLLM, LM Studio, llama.cpp). Only `anthropic` and
 `openai` pull an SDK; the other two talk HTTP directly.
+
+## Running on a local model
+
+Point it at [Ollama](https://ollama.com) and everything runs on your machine,
+offline, with no API key:
+
+```bash
+ollama serve
+ollama pull llama3.2:3b        # or qwen2.5:7b, llama3.1:8b, ...
+pa -p local -m llama3.2:3b
+```
+
+Small local models are weak at tool use — give a 3B model a big tool list and a
+long prompt and it will often write its tool calls as *plain text JSON* instead
+of using the structured tool API, and nothing runs. The **harness** layer fixes
+this:
+
+- **`harness: auto`** (the default) starts on the native tool API and, the first
+  time a model answers with a tool call written as text, switches that session
+  to a *prompted* protocol — tools described in the system prompt, calls parsed
+  back out of the reply — and retries. The failure heals itself instead of
+  silently dropping the call. `harness: prompted` forces that path (works with
+  *any* model, even ones with no tool API); `harness: native` forces the API.
+- **Tool trimming.** On a local provider the tool list is automatically cut to a
+  focused core (`shell`, `files`, `web`, `tasks`) so a small model is not
+  drowned in choices. Override with `tools:` in the config or `--tools`, or cap
+  explicitly with `max_tools`.
+- `/harness` in the REPL shows which path is active.
+
+Bigger local models (`llama3.1:8b`, `qwen2.5:7b`+) use the native tool API
+directly and handle the full tool set. The weaker the model, the more the
+harness carries it — but a 3B model on a laptop with no GPU genuinely completes
+multi-tool tasks this way.
 
 ## Always-on daemon
 
@@ -361,6 +404,7 @@ src/pa/
   session.py        conversation persistence
   prompts.py        system prompt assembly
   deps.py           lazy, on-demand dependency installation
+  harness.py        native vs. prompted tool-calling (local-model support)
   daemon.py         persistent agent over a Unix socket
   client.py         talks to a running daemon
   service.py        systemd user-service install/uninstall

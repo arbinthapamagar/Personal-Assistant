@@ -33,11 +33,17 @@ class Thinking:
 
 @dataclass
 class ToolCall:
-    """A model's request to run a tool."""
+    """A model's request to run a tool.
+
+    `meta` carries opaque provider data that must survive a round trip - e.g.
+    Gemini's per-call `thought_signature`, which the API rejects the follow-up
+    turn without. It is provider-private; the agent and tools never read it.
+    """
 
     id: str
     name: str
     arguments: dict[str, Any]
+    meta: dict[str, Any] | None = None
     type: Literal["tool_call"] = "tool_call"
 
 

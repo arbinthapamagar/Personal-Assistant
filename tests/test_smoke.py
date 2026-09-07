@@ -311,3 +311,66 @@ def test_ollama_installed_but_down_is_distinguished(monkeypatch):
     monkeypatch.setattr(caps_mod.subprocess, "run", lambda *a, **k: Result())
     installed, running, models = caps_mod._detect_ollama()
     assert installed and not running and models == []
+
+
+# ---- rate-limit fallback ---------------------------------------------------
+
+
+def test_rate_limit_falls_through_to_next_profile(tmp_path, monkeypatch):
+    """When the active model is rate-limited, the agent switches to the next
+    profile in the fallback chain and the turn still completes."""
+    from pa.errors import RateLimitError
+    import pa.providers as providers_mod
+
+    class RateLimited(FakeProvider):
+        def complete(self, *, system, messages, tools=(), on_text=None):
+            raise RateLimitError("quota exceeded")
+
+    class Working(FakeProvider):
+        def complete(self, *, system, messages, tools=(), on_text=None):
+            return Completion(
+                Message("assistant", [Text("rescued by fallback")]),
+                "end_turn", Usage(1, 1), "backup-model",
+            )
+
+    cfg = config_mod.default_config()
+    cfg.active_profile = "primary"
+    cfg.profiles = {
+        "primary": config_mod.Profile("primary", "ollama"),
+        "backup": config_mod.Profile("backup", "ollama"),
+    }
+    cfg.fallback = ["backup"]
+    cfg.security.mode = "allow"
+    cfg.tools = ["shell"]
+    caps = capabilities.probe()
+    ctx = ToolContext(cfg, caps, Gate(cfg.security), lambda k, d: True, cwd=tmp_path)
+    registry = build_registry(cfg, caps)
+
+    monkeypatch.setattr(providers_mod, "build", lambda profile, config: Working([], profile, config))
+
+    agent = Agent(cfg, RateLimited([], cfg.profiles["primary"], cfg), registry, ctx, caps)
+    steps = list(agent.turn("hello"))
+    answers = [s for s in steps if s.kind == "text"]
+    notes = [s for s in steps if s.kind == "error" and "switching to" in s.text]
+    assert notes, "expected a fallback-switch notice"
+    assert any("rescued by fallback" in s.text for s in answers)
+
+
+def test_fallback_exhausted_reports_the_error(tmp_path, monkeypatch):
+    """With no fallbacks left, a rate limit surfaces as an error, not a hang."""
+    from pa.errors import RateLimitError
+
+    class RateLimited(FakeProvider):
+        def complete(self, *, system, messages, tools=(), on_text=None):
+            raise RateLimitError("quota exceeded")
+
+    cfg = config_mod.default_config()
+    cfg.active_profile = "local"
+    cfg.fallback = []  # nothing to fall back to
+    cfg.security.mode = "allow"
+    cfg.tools = ["shell"]
+    caps = capabilities.probe()
+    ctx = ToolContext(cfg, caps, Gate(cfg.security), lambda k, d: True, cwd=tmp_path)
+    agent = Agent(cfg, RateLimited([], cfg.profile, cfg), build_registry(cfg, caps), ctx, caps)
+    steps = list(agent.turn("hello"))
+    assert any(s.kind == "error" and "quota" in s.text.lower() for s in steps)

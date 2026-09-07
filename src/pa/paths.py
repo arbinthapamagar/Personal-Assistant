@@ -6,7 +6,8 @@ import os
 import sys
 from pathlib import Path
 
-APP = "personal-assistant"
+APP = "arbin-assistant"
+OLD_APP = "personal-assistant"
 
 
 def _xdg(var: str, default: str) -> Path:
@@ -50,6 +51,27 @@ def log_file() -> Path:
     return data_dir() / "pa.log"
 
 
+def _migrate_from_old_name() -> None:
+    """Carry over config/data written under the previous app name, once.
+
+    The tool was renamed to arbin-assistant; a user who ran the old name should
+    not silently lose their config, sessions, or memory. Move each old dir into
+    place only if the new one does not exist yet.
+    """
+    import shutil
+
+    for new, old in (
+        (config_dir(), config_dir().with_name(OLD_APP)),
+        (data_dir(), data_dir().with_name(OLD_APP)),
+    ):
+        if old.exists() and not new.exists():
+            try:
+                shutil.move(str(old), str(new))
+            except OSError:
+                pass
+
+
 def ensure_dirs() -> None:
+    _migrate_from_old_name()
     for d in (config_dir(), data_dir(), cache_dir(), sessions_dir()):
         d.mkdir(parents=True, exist_ok=True)

@@ -26,8 +26,10 @@ commands
   /tasks                list background tasks
   /memory               memory store stats
   /caps                 what this machine can do
+  /harness              show how tools are being called (native/prompted)
   /check                verify the current provider's credentials
   /mode [ask|allow|deny] show or change the permission mode
+  /yolo                 skip all permission prompts (toggle)
   /audit                what has been approved or denied this session
   /stats                token usage for this session
   /voice                toggle spoken input and replies
@@ -39,10 +41,56 @@ commands
 """
 
 
+def _slash_help_map() -> dict[str, str]:
+    """Parse the HELP block into {command: description} for autocompletion.
+
+    Derived from the one HELP string so the completer never drifts from the
+    /help text - a single source of truth for the command list."""
+    out: dict[str, str] = {}
+    for line in HELP.splitlines():
+        line = line.strip()
+        if not line.startswith("/"):
+            continue
+        # e.g. "/profile [name]       show or switch provider profile"
+        head, _, desc = line.partition("  ")
+        for token in head.split():
+            if token.startswith("/"):
+                out[token[1:]] = desc.strip()
+    return out
+
+
+def _indent_help(help_text: str) -> str:
+    """The REPL HELP block, minus its own 'commands' header, for the --help
+    epilog (argparse adds section headers itself)."""
+    lines = help_text.strip().splitlines()
+    if lines and lines[0].strip() == "commands":
+        lines = lines[1:]
+    return "\n".join(lines)
+
+
 def build_parser() -> argparse.ArgumentParser:
+    # The epilog carries the in-session slash commands and a few examples, so
+    # `--help` is a single complete reference rather than only the flags.
+    epilog = f"""
+in-session commands (type these at the > prompt)
+{_indent_help(HELP)}
+examples
+  arbin-assistant                         start chatting (uses the default profile)
+  arbin-assistant -p gemini-pro           use the smartest Gemini model
+  arbin-assistant -p gemini-lite "hi"     one-shot on the fast model
+  arbin-assistant -p local                offline, no key
+  arbin-assistant --voice                 talk to it out loud
+  arbin-assistant --serve                 run the always-on daemon
+  arbin-assistant --doctor                show what this machine can do
+
+profiles are defined in ~/.config/arbin-assistant/config.yaml
+switch model live with  /profile <name>  or  /model <id>
+"""
     parser = argparse.ArgumentParser(
-        prog="pa",
-        description="A provider-agnostic AI agent for your terminal, browser, and desktop.",
+        prog="arbin-assistant",
+        description="arbin-assistant - your local AI assistant for the terminal, browser, and desktop.",
+        epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("prompt", nargs="*", help="Run one prompt and exit.")
     parser.add_argument("-p", "--profile", help="Profile to use (see /profile).")
@@ -60,6 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Pre-download the local embedding model, then exit.")
     parser.add_argument("--voice", action="store_true",
                         help="Talk to it: spoken input, spoken replies.")
+    parser.add_argument("--yolo", action="store_true",
+                        help="Skip ALL permission prompts this session (like --mode allow).")
 
     daemon_group = parser.add_argument_group("daemon (a persistent agent reachable from anywhere)")
     daemon_group.add_argument("--serve", action="store_true",
@@ -75,8 +125,21 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_group.add_argument("--uninstall-service", action="store_true",
                               help="Stop and remove the systemd user service, then exit.")
 
-    parser.add_argument("--version", action="version", version=f"pa {__version__}")
+    parser.add_argument("--version", action="version", version=f"arbin-assistant {__version__}")
     return parser
+
+
+def _config_sets_tools(path) -> bool:
+    """Did the user pin a tool list in their config file? If so, respect it
+    rather than swapping in the local preset."""
+    import yaml as _yaml
+
+    target = path or paths.config_file()
+    try:
+        raw = _yaml.safe_load(target.read_text()) or {}
+    except (OSError, _yaml.YAMLError):
+        return False
+    return isinstance(raw, dict) and "tools" in raw
 
 
 def make_approver(ui: UI, gate: Gate):
@@ -198,14 +261,23 @@ def handle_command(line: str, state: dict) -> bool:
     if cmd in ("help", "h", "?"):
         ui.console.print(HELP)
     elif cmd == "profile":
-        if not args:
-            rows = [
-                [("* " if n == cfg.active_profile else "  ") + n, p.provider, p.model]
+        name = args[0] if args else None
+        if name is None:
+            # Arrow-key picker on a real terminal; a listing otherwise.
+            options = [
+                (n, f"{n:12} {p.provider}:{p.model}"
+                    + ("  (current)" if n == cfg.active_profile else ""))
                 for n, p in sorted(cfg.profiles.items())
             ]
-            ui.table("profiles", ["name", "provider", "model"], rows)
-        else:
-            name = args[0]
+            name = ui.choose("switch model profile", options,
+                             footer="↑/↓ move · enter select · esc cancel")
+            if name is None:
+                rows = [
+                    [("* " if n == cfg.active_profile else "  ") + n, p.provider, p.model]
+                    for n, p in sorted(cfg.profiles.items())
+                ]
+                ui.table("profiles", ["name", "provider", "model"], rows)
+        if name is not None:
             if name not in cfg.profiles:
                 ui.error(f"no profile {name!r}. Known: {', '.join(sorted(cfg.profiles))}")
             else:
@@ -219,17 +291,27 @@ def handle_command(line: str, state: dict) -> bool:
                     state["config"] = new_cfg
                     ui.info(f"now using {name} -> {provider.model}")
     elif cmd == "model":
-        if not args:
-            ui.info(f"{cfg.active_profile} -> {agent.provider.model}")
-        else:
-            cfg.profile.model = args[0]
+        target = args[0] if args else None
+        if target is None:
+            models = agent.provider.list_models()
+            if models:
+                target = ui.choose(
+                    f"pick a model for {cfg.active_profile}",
+                    [(m, m + ("  (current)" if m == agent.provider.model else ""))
+                     for m in models],
+                )
+            if target is None:
+                ui.info(f"{cfg.active_profile} -> {agent.provider.model}"
+                        + (f"   ({len(models)} available - /models)" if models else ""))
+        if target is not None:
+            cfg.profile.model = target
             try:
                 provider = providers.build(cfg.profile, cfg)
             except PAError as exc:
                 ui.error(str(exc))
             else:
                 agent.switch_profile(cfg.active_profile, provider)
-                ui.info(f"model is now {args[0]}")
+                ui.info(f"model is now {target}")
     elif cmd == "models":
         models = agent.provider.list_models()
         ui.console.print("\n".join(f"  {m}" for m in models) if models
@@ -283,8 +365,18 @@ def handle_command(line: str, state: dict) -> bool:
             ui.warn("usage: /say <text>")
         else:
             _speaker(state)(text)
+    elif cmd == "harness":
+        ui.info(
+            f"harness: {agent._resolved_mode}"
+            + (f" (mode '{agent.harness_mode}')" if agent.harness_mode != agent._resolved_mode else "")
+        )
+        if agent._resolved_mode == "prompted":
+            ui.info("tools are described in the prompt and parsed from text - "
+                    "the robust path for local models")
     elif cmd == "caps":
         ui.console.print(agent.caps.summary())
+        backend = agent.ctx.store.name if agent.ctx.store is not None else "none"
+        ui.console.print(f"state       {backend}")
         if agent.ctx.gate.disabled_rules:
             ui.warn(
                 "denial-floor rules disabled by config: "
@@ -294,15 +386,30 @@ def handle_command(line: str, state: dict) -> bool:
         ui.info("checking ...")
         ui.console.print(f"  {agent.provider.check()}")
     elif cmd == "mode":
-        if not args:
+        target = args[0] if args else ui.choose(
+            "permission mode",
+            [("ask", "ask     - confirm each tool call (safe default)"),
+             ("allow", "allow   - run without asking (floor rules still apply)"),
+             ("deny", "deny    - refuse anything not explicitly allowed")],
+        )
+        if target is None:
             ui.info(f"permission mode: {cfg.security.mode}")
-        elif args[0] not in ("ask", "allow", "deny"):
+        elif target not in ("ask", "allow", "deny"):
             ui.error("mode must be ask, allow, or deny")
         else:
-            cfg.security.mode = args[0]
-            if args[0] == "allow":
+            cfg.security.mode = target
+            if target == "allow":
                 ui.warn("every tool call will now run without asking - hard denials still apply")
-            ui.info(f"permission mode: {args[0]}")
+            ui.info(f"permission mode: {target}")
+    elif cmd == "yolo":
+        if cfg.security.mode == "allow":
+            cfg.security.mode = "ask"
+            ui.info("permission prompts are back ON")
+        else:
+            cfg.security.mode = "allow"
+            ui.warn("YOLO: every tool call now runs without asking. "
+                    + ("The safety floor is OFF too." if agent.ctx.gate.floor_off
+                       else "The catastrophic-command floor still applies."))
     elif cmd == "audit":
         ui.console.print(agent.ctx.gate.audit())
     elif cmd == "stats":
@@ -342,10 +449,23 @@ def repl(agent: Agent, ui: UI, cfg: config_mod.Config, *, voice_mode: bool = Fal
         from prompt_toolkit import PromptSession
         from prompt_toolkit.history import FileHistory
 
+        from .tui import SlashCompleter
+
         paths.ensure_dirs()
-        prompt_session = PromptSession(history=FileHistory(str(paths.data_dir() / "history")))
+        # Autocomplete slash commands as the user types "/", and show live
+        # model/mode in a bottom toolbar - the Claude-Code-style prompt.
+        completer = SlashCompleter(_slash_help_map()).build()
+        prompt_session = PromptSession(
+            history=FileHistory(str(paths.data_dir() / "history")),
+            completer=completer,
+            complete_while_typing=True,
+        )
     except ImportError:
         pass  # plain input() still works, just without history or editing
+
+    def toolbar():
+        c = state["config"]
+        return f"  {c.active_profile} · {agent.provider.model} · mode:{c.security.mode}   /help"
 
     while True:
         if state["voice_mode"]:
@@ -354,11 +474,10 @@ def repl(agent: Agent, ui: UI, cfg: config_mod.Config, *, voice_mode: bool = Fal
                 continue
         else:
             try:
-                prompt = "> "
                 if prompt_session is not None:
-                    line = prompt_session.prompt(prompt)
+                    line = prompt_session.prompt("› ", bottom_toolbar=toolbar)
                 else:
-                    line = input(prompt)
+                    line = input("> ")
             except EOFError:
                 ui.console.print()
                 return 0
@@ -446,13 +565,16 @@ def _voice_input(state: dict) -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Carry over config/data from the tool's former name before anything reads
+    # it, so a rename never silently loses a user's setup.
+    paths._migrate_from_old_name()
     args = build_parser().parse_args(argv)
     ui = UI(plain=args.plain, quiet=args.quiet)
 
     overrides = {
         "profile": args.profile,
         "model": args.model,
-        "mode": args.mode,
+        "mode": "allow" if args.yolo else args.mode,
     }
     if args.no_stream:
         overrides["stream"] = False
@@ -464,6 +586,12 @@ def main(argv: list[str] | None = None) -> int:
     except PAError as exc:
         ui.error(str(exc))
         return 2
+
+    # Local models drown in a big tool list. If the user is on a local provider
+    # and did not choose tools themselves, fall back to the curated local set.
+    _tools_were_chosen = bool(args.tools) or _config_sets_tools(args.config)
+    if cfg.profile.provider in ("ollama", "openai-compat") and not _tools_were_chosen:
+        cfg.tools = list(cfg.local_tools)
 
     if args.doctor:
         return doctor(ui, cfg)
@@ -534,15 +662,12 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     caps = capabilities.probe()
-    for note in caps.notes:
-        if not args.quiet:
-            ui.info(note)
 
     try:
         provider = providers.build(cfg.profile, cfg)
     except PAError as exc:
         ui.error(str(exc))
-        ui.info("run `pa --doctor` to see what is configured, or `pa /config` for the config file")
+        ui.info("run `arbin-assistant --doctor` to see what is configured")
         return 2
 
     gate = Gate(cfg.security)
@@ -551,8 +676,8 @@ def main(argv: list[str] | None = None) -> int:
     except PAError as exc:
         ui.warn(f"state backend unavailable ({exc}); background tasks disabled")
         state = None
-    if state is not None and not args.quiet:
-        ui.info(f"state backend: {state.name}")
+    # Routine startup notes (Wayland advice, which state backend) are available
+    # on demand via /caps; showing them on every launch buries the welcome card.
     ctx = ToolContext(cfg, caps, gate, make_approver(ui, gate), store=state)
     try:
         registry = build_registry(cfg, caps)
@@ -619,7 +744,7 @@ def _daemon_repl(ui: UI, cfg: config_mod.Config, *, speak=None) -> int:
     from . import client
 
     ui.console.print(
-        "[bold]personal assistant[/] [dim](connected to daemon)[/]  "
+        "[bold cyan]arbin-assistant[/] [dim](connected to daemon)[/]  "
         "[dim]/quit to disconnect[/]\n"
     )
     prompt_session = None

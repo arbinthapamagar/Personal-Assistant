@@ -54,12 +54,18 @@ class NativeHarness(Harness):
 # ---------------------------------------------------------------------------
 
 _PROTOCOL = """\
-You can use tools. To call one, reply with a SINGLE line that is exactly one \
-JSON object and nothing else:
+You are running on the user's computer and you act ONLY through tools. You \
+cannot see files, run commands, or read the web except by calling a tool. Never \
+guess or invent a result - if answering needs information you do not already \
+have, call a tool to get it. Making up file names, command output, or search \
+results is a serious error.
+
+To call a tool, reply with a SINGLE line that is exactly one JSON object and \
+nothing else:
 {{"tool": "<tool_name>", "args": {{ ... }}}}
-Call several tools at once by putting one such JSON object on each line. To \
-answer the user, reply with normal prose and no JSON. Never explain a tool call \
-and call it in the same message - either call tools, or answer.
+Put one such JSON object per line to call several at once. When you have enough \
+information, reply with a normal prose answer and NO JSON. In any one message, \
+either call tools or answer - never both.
 
 Available tools:
 {tools}

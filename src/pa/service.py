@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .errors import PAError
 
-SERVICE_NAME = "personal-assistant.service"
+SERVICE_NAME = "arbin-assistant.service"
 
 
 def _unit_dir() -> Path:
@@ -36,7 +36,7 @@ def _unit_text() -> str:
     exec_start = f"{_pa_binary()} --serve --quiet"
     return f"""\
 [Unit]
-Description=Personal Assistant agent daemon
+Description=arbin-assistant agent daemon
 After=default.target
 
 [Service]

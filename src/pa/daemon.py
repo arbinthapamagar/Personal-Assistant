@@ -37,7 +37,7 @@ from .errors import PAError
 def socket_path() -> Path:
     runtime = os.environ.get("XDG_RUNTIME_DIR")
     base = Path(runtime) if runtime else paths.data_dir()
-    directory = base / "personal-assistant"
+    directory = base / "arbin-assistant"
     directory.mkdir(parents=True, exist_ok=True)
     return directory / "pa.sock"
 
@@ -95,7 +95,7 @@ class Daemon:
         self._server.settimeout(1.0)
         pid_path().write_text(str(os.getpid()))
         self._log(f"listening on {path} (pid {os.getpid()})")
-        self._notify("Assistant daemon started", "Reach it with: pa send \"...\"")
+        self._notify("arbin-assistant daemon started", "Reach it with: arbin-assistant --daemon \"...\"")
 
         try:
             while not self._stop.is_set():
@@ -297,7 +297,7 @@ class Daemon:
                 import subprocess
 
                 subprocess.run(
-                    ["notify-send", "-a", "personal-assistant", title, body],
+                    ["notify-send", "-a", "arbin-assistant", title, body],
                     check=False, capture_output=True, timeout=5,
                 )
             except (OSError, PAError):

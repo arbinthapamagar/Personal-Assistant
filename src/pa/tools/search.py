@@ -61,21 +61,36 @@ def _unwrap(url: str) -> str:
     return url
 
 
-def _duckduckgo(query: str, limit: int) -> list[Result]:
-    try:
-        response = httpx.post(
-            "https://lite.duckduckgo.com/lite/",
-            data={"q": query},
-            headers={"User-Agent": UA},
-            follow_redirects=True,
-            timeout=25.0,
-        )
-    except httpx.HTTPError as exc:
-        raise ToolError(f"DuckDuckGo request failed: {exc}") from exc
-    if response.status_code == 202 or "anomaly" in response.text.lower():
+def _duckduckgo(query: str, limit: int, proxy: str | None = None) -> list[Result]:
+    import time
+
+    # DuckDuckGo throttles scrapers with a 202 + "anomaly" body. It usually
+    # clears in a few tens of seconds, and the html endpoint is a second chance
+    # when lite is blocked, so try both with a short backoff before giving up.
+    endpoints = ["https://lite.duckduckgo.com/lite/", "https://html.duckduckgo.com/html/"]
+    response = None
+    for attempt in range(3):
+        endpoint = endpoints[attempt % len(endpoints)]
+        try:
+            response = httpx.post(
+                endpoint, data={"q": query}, headers={"User-Agent": UA},
+                follow_redirects=True, timeout=25.0, proxy=proxy,
+            )
+        except httpx.HTTPError as exc:
+            if attempt == 2:
+                raise ToolError(f"DuckDuckGo request failed: {exc}") from exc
+            time.sleep(2 ** attempt)
+            continue
+        throttled = response.status_code == 202 or "anomaly" in response.text.lower()
+        if not throttled and response.status_code < 400:
+            break
+        if attempt < 2:
+            time.sleep(2 ** attempt * 2)  # 2s, 8s
+    if response is None or response.status_code == 202 or "anomaly" in response.text.lower():
         raise ToolError(
-            "DuckDuckGo is rate-limiting this machine. Wait a minute, or configure "
-            "a different search backend (searxng or brave) in the config."
+            "DuckDuckGo is rate-limiting this machine. It usually clears in a "
+            "minute. For heavy use, set a free SearxNG instance or a Brave key "
+            "as search.backend in the config - no rate limits."
         )
     if response.status_code >= 400:
         raise ToolError(f"DuckDuckGo returned HTTP {response.status_code}")
@@ -110,13 +125,13 @@ def _duckduckgo(query: str, limit: int) -> list[Result]:
     return results
 
 
-def _searxng(query: str, limit: int, base_url: str) -> list[Result]:
+def _searxng(query: str, limit: int, base_url: str, proxy: str | None = None) -> list[Result]:
     try:
         response = httpx.get(
             f"{base_url.rstrip('/')}/search",
             params={"q": query, "format": "json"},
             headers={"User-Agent": UA},
-            timeout=25.0,
+            timeout=25.0, proxy=proxy,
         )
         response.raise_for_status()
         payload = response.json()
@@ -133,13 +148,13 @@ def _searxng(query: str, limit: int, base_url: str) -> list[Result]:
     ]
 
 
-def _brave(query: str, limit: int, api_key: str) -> list[Result]:
+def _brave(query: str, limit: int, api_key: str, proxy: str | None = None) -> list[Result]:
     try:
         response = httpx.get(
             "https://api.search.brave.com/res/v1/web/search",
             params={"q": query, "count": min(limit, 20)},
             headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
-            timeout=25.0,
+            timeout=25.0, proxy=proxy,
         )
         if response.status_code in (401, 403):
             raise ToolError("Brave rejected the API key")
@@ -183,35 +198,46 @@ class WebSearchTool(Tool):
         if not query:
             raise ToolError("no query given")
         limit = min(max(int(args.get("limit") or 8), 1), 25)
-
-        settings = getattr(ctx.config, "search", None) or {}
-        backend = settings.get("backend", "duckduckgo")
-
-        if backend == "searxng":
-            base = settings.get("base_url")
-            if not base:
-                raise ToolError("search.backend is 'searxng' but search.base_url is not set")
-            results = _searxng(query, limit, base)
-        elif backend == "brave":
-            import os
-
-            key = settings.get("api_key") or os.environ.get(
-                settings.get("api_key_env", "BRAVE_API_KEY") or "BRAVE_API_KEY", ""
-            )
-            if not key:
-                raise ToolError("search.backend is 'brave' but no API key is configured")
-            results = _brave(query, limit, key)
-        elif backend == "duckduckgo":
-            results = _duckduckgo(query, limit)
-        else:
-            raise ToolError(
-                f"unknown search backend {backend!r}; use duckduckgo, searxng, or brave"
-            )
-
+        results = run_search(ctx.config, query, limit)
         if not results:
             return f"no results for {query!r}"
         body = "\n".join(r.render(i) for i, r in enumerate(results, 1))
         return ctx.truncate(f"{UNTRUSTED_HEADER}{len(results)} results for {query!r}\n\n{body}")
+
+
+def run_search(config, query: str, limit: int, *, official_first: bool = True) -> list[Result]:
+    """Search via the configured backend, routed over Tor when enabled, with
+    results reordered to put official/authoritative sources first. Shared by
+    the search and research tools."""
+    from .. import net
+    from . import sourcerank
+
+    settings = getattr(config, "search", None) or {}
+    backend = settings.get("backend", "duckduckgo")
+    # Tor gives a fresh exit IP per circuit, which is what lets heavy searching
+    # dodge the free backends' rate limits.
+    proxy = net.tor_settings(config)["socks"] if net.tor_settings(config)["enabled"] else None
+
+    if backend == "searxng":
+        base = settings.get("base_url")
+        if not base:
+            raise ToolError("search.backend is 'searxng' but search.base_url is not set")
+        results = _searxng(query, limit, base, proxy)
+    elif backend == "brave":
+        import os
+
+        key = settings.get("api_key") or os.environ.get(
+            settings.get("api_key_env", "BRAVE_API_KEY") or "BRAVE_API_KEY", ""
+        )
+        if not key:
+            raise ToolError("search.backend is 'brave' but no API key is configured")
+        results = _brave(query, limit, key, proxy)
+    elif backend == "duckduckgo":
+        results = _duckduckgo(query, limit, proxy)
+    else:
+        raise ToolError(f"unknown search backend {backend!r}; use duckduckgo, searxng, or brave")
+
+    return sourcerank.rerank(results, query) if official_first else results
 
 
 TOOLS = [WebSearchTool]
