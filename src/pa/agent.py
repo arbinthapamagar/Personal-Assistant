@@ -164,9 +164,19 @@ class Agent:
         # Streaming tokens are meaningless once we may re-parse the whole text,
         # so only stream under the native harness.
         stream_sink = on_text if self._resolved_mode == "native" else None
-        completion = self._provider_complete(
-            system=system, messages=messages, tools=provider_tools, on_text=stream_sink
-        )
+        try:
+            completion = self._provider_complete(
+                system=system, messages=messages, tools=provider_tools, on_text=stream_sink
+            )
+        except ProviderError as exc:
+            # Some local models (e.g. dolphin-mistral) have no native tool
+            # support and the backend hard-rejects a request that carries
+            # tools. That is a definitive "use the prompted protocol" signal -
+            # switch and retry, rather than failing the turn.
+            if self._should_switch_to_prompted(exc):
+                self._switch_to_prompted()
+                return self._complete_prompted(tools)
+            raise
         completion = self.harness.interpret(completion)
 
         if (
@@ -174,17 +184,39 @@ class Agent:
             and self._resolved_mode == "native"
             and looks_like_unparsed_tool_call(completion)
         ):
-            # Self-heal: this model needs the prompted protocol.
-            self._resolved_mode = "prompted"
-            self.harness = build_harness("prompted")
-            system, messages, provider_tools = self.harness.prepare(
-                self._system, list(self.session.messages), tools
-            )
-            completion = self._provider_complete(
-                system=system, messages=messages, tools=provider_tools, on_text=None
-            )
-            completion = self.harness.interpret(completion)
+            # Self-heal: this model wrote a tool call as text -> prompted.
+            self._switch_to_prompted()
+            return self._complete_prompted(tools)
         return completion
+
+    def _should_switch_to_prompted(self, exc: ProviderError) -> bool:
+        if self.harness_mode != "auto" or self._resolved_mode != "native":
+            return False
+        text = str(exc).lower()
+        return "does not support tools" in text or "does not support insert" in text \
+            or ("tool" in text and "support" in text)
+
+    def _switch_to_prompted(self) -> None:
+        self._resolved_mode = "prompted"
+        self.harness = build_harness("prompted")
+
+    def _complete_prompted(self, tools) -> Completion:
+        """Re-run the request under the prompted harness (no native tools)."""
+        base_system = self._system
+        if getattr(self, "_recall_block", ""):
+            base_system = f"{base_system}\n\n{self._recall_block}"
+        from .tools.plan import render_plan
+
+        plan_block = render_plan(self.ctx)
+        if plan_block:
+            base_system = f"{base_system}\n\n{plan_block}"
+        system, messages, provider_tools = self.harness.prepare(
+            base_system, list(self.session.messages), tools
+        )
+        completion = self._provider_complete(
+            system=system, messages=messages, tools=provider_tools, on_text=None
+        )
+        return self.harness.interpret(completion)
 
     def _provider_complete(self, **kwargs) -> Completion:
         """Call the provider, falling through the fallback chain on a rate

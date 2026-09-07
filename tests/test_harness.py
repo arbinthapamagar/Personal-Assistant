@@ -173,3 +173,46 @@ def test_build_harness_selects_by_mode():
     assert build_harness("prompted").name == "prompted"
     assert build_harness("native").name == "native"
     assert build_harness("auto").name == "native"  # auto starts native
+
+
+# ---- error-driven prompted switch (models with no native tool support) -----
+
+
+def test_agent_switches_to_prompted_when_backend_rejects_tools(tmp_path):
+    """A model like dolphin-mistral 400s on a request carrying tools. The agent
+    must switch to the prompted protocol and retry, not fail the turn."""
+    import sys as _sys
+    from pathlib import Path as _P
+    _sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "src"))
+    from pa import capabilities, config as config_mod
+    from pa.agent import Agent
+    from pa.errors import ProviderError
+    from pa.messages import Completion, Message, Text, Usage
+    from pa.providers.base import Provider
+    from pa.security import Gate
+    from pa.tools.base import ToolContext, build_registry
+
+    class NoNativeTools(Provider):
+        name = "fake"
+        def __init__(self, profile, config):
+            super().__init__(profile, config)
+            self.calls = 0
+        def complete(self, *, system, messages, tools=(), on_text=None):
+            self.calls += 1
+            # First call carries native tools -> reject like Ollama does.
+            if tools:
+                raise ProviderError("Ollama HTTP 400: dolphin-mistral does not support tools")
+            # Prompted retry sends no native tools -> answer.
+            return Completion(Message("assistant", [Text("hello from prompted")]),
+                              "end_turn", Usage(1, 1), "dolphin")
+
+    cfg = config_mod.default_config()
+    cfg.active_profile = "local"; cfg.security.mode = "allow"
+    cfg.tools = ["shell"]; cfg.harness = "auto"; cfg.auto_memory = {"enabled": False}
+    caps = capabilities.probe()
+    ctx = ToolContext(cfg, caps, Gate(cfg.security), lambda k, d: True)
+    agent = Agent(cfg, NoNativeTools(cfg.profile, cfg), build_registry(cfg, caps), ctx, caps)
+
+    out = [s for s in agent.turn("hi") if s.kind == "text"]
+    assert any("prompted" in s.text for s in out)
+    assert agent._resolved_mode == "prompted"   # healed
